@@ -1,8 +1,14 @@
 # Configuration
 
-**Most people need none of this page.** Run `VCThunder.exe` with no arguments: the launcher shows
-every shipped setting with its own help text. To get back to the shipped defaults, delete
-`vcthunder.ini` and start again. This page is what the launcher cannot show; §8 lists every key.
+For the native Linux port, run `./build/vcthunder` and open **F1** for settings.
+First-time import is documented in [building.md](building.md); local multiplayer
+is in [linked-play.md](linked-play.md). Settings are saved to `vcthunder.ini`.
+The authoritative defaults and ranges are in `src/settings.def`.
+
+The detailed catalog below is retained from upstream. References to its Windows
+launcher, diagnostics and interpolated 60 FPS mode are historical; those paths
+are not implemented in the native Linux build. Use the current in-game menu
+and [README](../README.md#in-game-settings) for supported native controls.
 
 ---
 

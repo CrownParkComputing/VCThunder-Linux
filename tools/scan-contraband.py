@@ -6,7 +6,7 @@ The primary boundary is the directory layout: game dumps, wrappers, VM images
 and research caches live outside this repository, where no `git add` can reach
 them. This is the second backstop, on a rule that needs no corpus to maintain:
 
-    THIS REPOSITORY CONTAINS UTF-8 TEXT AND ONE ICON. NOTHING ELSE.
+    SOURCE IS UTF-8 TEXT; ONLY NAMED DOCUMENTATION IMAGES AND THE ICON ARE BINARY.
 
 Every kind of contraband anyone has worried about here fails that rule without
 anyone having to predict it, where a keyword list would produce false positives
@@ -29,11 +29,17 @@ from pathlib import Path
 # and data/ is the unpacked games. Both live inside this tree, so without
 # these two entries the scan reports every file in them and `make check` fails
 # on a repository that is perfectly clean.
-SKIP_DIRS = {'build', '__pycache__', '.git', 'chd', 'run', 'data'}
+SKIP_DIRS = {'build', '__pycache__', '.git', 'chd', 'run', 'data', 'save'}
 
-# The one binary this repository is allowed to contain. It is project-authored,
-# generated from coordinates, and it has to be binary to be an icon.
-BINARY_ALLOWLIST = {'res/vcthunder.ico'}
+# Only these named icon/documentation images are permitted binary files.
+# The screenshots illustrate the port; playable game data remains excluded.
+BINARY_ALLOWLIST = {
+    'res/vcthunder.ico',
+    'docs/images/first-run-setup.png',
+    'docs/images/nuklear-menu.png',
+    'docs/images/dual-screen.jpg',
+    'docs/images/four-player.jpg',
+}
 
 # Belt over the text rule: these never belong here whatever their content.
 FORBIDDEN_SUFFIXES = {
@@ -69,6 +75,11 @@ def check(path, rel):
         findings.append(f'{size / 1024:.0f} KiB exceeds the {MAX_BYTES // 1024} KiB limit')
 
     if rel in BINARY_ALLOWLIST:
+        raw = path.read_bytes()
+        if rel.endswith('.png') and not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+            findings.append('documentation PNG has an invalid signature')
+        if rel.endswith('.jpg') and not (raw.startswith(b'\xff\xd8') and raw.endswith(b'\xff\xd9')):
+            findings.append('documentation JPEG has an invalid signature')
         return findings
 
     raw = path.read_bytes()

@@ -97,7 +97,7 @@ void vgl_window_title(char *buf, size_t n, double fps)
 {
     char name[32];
     const char *cabinet = getenv("VCT_DUAL_CABINET");
-    if (cabinet && (!strcmp(cabinet, "1") || !strcmp(cabinet, "2"))) {
+    if (cabinet && cabinet[0] >= '1' && cabinet[0] <= '4' && !cabinet[1]) {
         snprintf(buf, n, "Offroad Thunder - Linked cabinet %s (%.1f fps)", cabinet, fps);
         return;
     }

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="390" viewBox="0 0 1440 390" role="img" aria-labelledby="title desc">
+<title id="title">VCThunder — native Linux arcade ports</title><desc id="desc">Hydro Thunder and Offroad Thunder, with Vulkan graphics, Xbox controls and two to four linked players.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#071421"/><stop offset="1" stop-color="#102c3d"/></linearGradient><linearGradient id="accent"><stop stop-color="#55e5d5"/><stop offset="1" stop-color="#75a9ff"/></linearGradient></defs>
+<rect width="1440" height="390" rx="24" fill="url(#bg)"/>
+<g fill="none" stroke="#22465c" stroke-width="1"><path d="M820 0 530 390M1000 0 710 390M1180 0 890 390M1360 0 1070 390M1440 100 1250 390"/><path d="M0 305H1440M0 335H1440M0 365H1440"/></g>
+<rect x="48" y="46" width="5" height="222" rx="2" fill="url(#accent)"/>
+<g font-family="DejaVu Sans, sans-serif"><text x="78" y="74" fill="#65e6d7" font-size="17" font-weight="700" letter-spacing="4">NATIVE LINUX · ORIGINAL ARCADE CODE</text>
+<text x="73" y="163" fill="#f0f7ff" font-size="78" font-weight="800" letter-spacing="-3">VCThunder</text>
+<text x="78" y="211" fill="#c5d8e7" font-size="27">Hydro Thunder + Offroad Thunder</text>
+<text x="78" y="251" fill="#91adbf" font-size="21">Build. Import your games. Play.</text>
+<g font-size="17" font-weight="600"><rect x="78" y="295" width="123" height="43" rx="21" fill="#18374a"/><text x="104" y="323" fill="#77eddf">Vulkan</text>
+<rect x="216" y="295" width="155" height="43" rx="21" fill="#18374a"/><text x="243" y="323" fill="#dce9f5">Xbox pads</text>
+<rect x="386" y="295" width="220" height="43" rx="21" fill="#18374a"/><text x="411" y="323" fill="#ffce80">2–4 linked players</text></g></g>
+<g transform="translate(925 68)" fill="#0a1825" stroke="#50758d" stroke-width="3">
+<path d="M0 0H192L202 158H-10Z"/><path d="M219 0H411L421 158H209Z"/>
+<rect x="15" y="18" width="163" height="105" rx="6"/><rect x="234" y="18" width="163" height="105" rx="6"/>
+<path d="m-10 158-15 50H211l-9-50M209 158l-9 50H429l-8-50"/><path d="M-25 208v43h236v-43M200 208v43h229v-43"/>
+<g stroke="#5be5d7" stroke-width="3"><path d="m30 96 31-16 27 10 26-31 42 33M31 104h129"/><circle cx="96" cy="181" r="17"/><path d="M96 164v34M79 181h34"/></g>
+<g stroke="#ffc675" stroke-width="3"><path d="m251 101 34-43 33 25 26-31 37 49M260 103h112"/><circle cx="315" cy="181" r="17"/><path d="M315 164v34M298 181h34"/></g></g></svg>

@@ -340,13 +340,13 @@ static void change_setting(const setting_desc_t *s, int direction)
     } else snprintf(status, sizeof status, "Saved. %s", launcher ? "Applies when you launch a game." : "Use File > Restart game to apply.");
 }
 
-static int nrows(void) { return tab == FILE_TAB ? 8 : tab == SETUP_TAB ? (launcher ? 4 : 2) : counts[tab] + (tab == PERFORMANCE_TAB); }
+static int nrows(void) { return tab == FILE_TAB ? 9 : tab == SETUP_TAB ? (launcher ? 4 : 2) : counts[tab] + (tab == PERFORMANCE_TAB); }
 static int enabled(int r)
 {
     if (launcher && tab == SETUP_TAB && r >= 2) return installed(r - 2) && !busy();
     if (tab == SETUP_TAB || (tab == FILE_TAB && (r == 4 || r == 5))) return !busy();
     if (tab != FILE_TAB) return 1;
-    if (r == 6) return installed(1) && !busy() && !getenv("VCT_DUAL_CABINET");
+    if (r == 6 || r == 7) return installed(1) && !busy() && !getenv("VCT_DUAL_CABINET");
     if (r == 1 && getenv("VCT_DUAL_CABINET")) return 0;
     if (r == 0 || r == 3) return !launcher;
     if (r == 1 || r == 2) return installed(r - 1) && !busy();
@@ -368,7 +368,8 @@ static void action(int r, int d)
     if (r == 3) request = !strcmp(g_cfg.title, "offroad") ? 2 : 1;
     if (r == 4 || r == 5) { tab = SETUP_TAB; row = r - 4; pick(r == 5); }
     if (r == 6) request = 3;
-    if (r == 7) request = -1;
+    if (r == 7) request = 4;
+    if (r == 8) request = -1;
 }
 
 static void nav(int key)
@@ -481,7 +482,7 @@ static void build_ui(int width, int height)
             }
             nk_layout_row_dynamic(&ctx, 8, 1); nk_spacing(&ctx, 1);
         }
-        static const char *actions[] = {"Resume", "Play Hydro Thunder", "Play Offroad Thunder", "Restart game", "Import CHD / ROM archive...", "Import extracted folder...", "Linked Offroad (two screens)", "Quit"};
+        static const char *actions[] = {"Resume", "Play Hydro Thunder", "Play Offroad Thunder", "Restart game", "Import CHD / ROM archive...", "Import extracted folder...", "Linked Offroad (two screens)", "Linked Offroad (four players)", "Quit"};
         static const char *setup[] = {"Choose CHD / ROM archive...", "Choose extracted game folder...", "Play Hydro Thunder", "Play Offroad Thunder"};
         for (int i = 0; i < nrows(); i++) {
             if (nav_moved && row == i) {
@@ -642,7 +643,7 @@ static void perform_request(void)
         exe[n - (sizeof deleted - 1)] = 0;
     extern int g_linux_argc;
     extern char **g_linux_argv;
-    char *args[68];
+    char *args[70];
     const char *title = request == 1 ? "hydro" : "offroad";
     int count = 0;
     args[count++] = exe; args[count++] = (char *)title;
@@ -658,7 +659,8 @@ static void perform_request(void)
             strcmp(arg, "--trace") && i + 1 < g_linux_argc && count < 64)
             args[count++] = g_linux_argv[++i];
     }
-    if (request == 3) args[count++] = "--dual-screen";
+    if (request == 3 || request == 4) args[count++] = "--dual-screen";
+    if (request == 4) { args[count++] = "--players"; args[count++] = "4"; }
     args[count] = NULL;
     nvram_flush(); audio_shutdown(); diego_shutdown();
     execv(exe, args);

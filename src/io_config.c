@@ -581,9 +581,9 @@ static void controls_load_ini(const char *path)
     s_cfg.provider = ini_provider(path);
     s_cfg.xinput_device = ini_unsigned(path, "analog", "xinput_device", 0);
     const char *cabinet_pad = getenv("VCT_GAMEPAD_INDEX");
-    if (cabinet_pad && (!strcmp(cabinet_pad, "0") || !strcmp(cabinet_pad, "1"))) {
+    if (cabinet_pad && cabinet_pad[0] >= '0' && cabinet_pad[0] <= '3' && !cabinet_pad[1]) {
         s_cfg.xinput_device = (unsigned)(cabinet_pad[0] - '0');
-        /* A missing second pad must not fall back to WinMM device 0 and
+        /* A missing pad must not fall back to WinMM device 0 and
          * drive both cabinets from the first player's controller. */
         s_cfg.provider = PROVIDER_XINPUT;
     }

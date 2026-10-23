@@ -61,7 +61,7 @@ if [ ! -f generated/default_ini_data.c ] || \
         generated/default_ini_data.c vcthunder_ini_data
 fi
 
-TESTS="di_role_test button_mask_test widescreen_shift_test ini_doc_test \
+TESTS="cabinet_layout_test di_role_test button_mask_test widescreen_shift_test ini_doc_test \
        launcher_model_test patch_emit_test config_test dinput_posix_test \
        xinput_posix_test rumble_model_test net_link_loopback_test \
        presenter_test window_posix_test hash_test loader_fixed_test win32_bind_test"

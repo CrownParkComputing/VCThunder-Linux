@@ -1,4 +1,4 @@
-/* Two independent Offroad cabinets using the game's original UDP link.
+/* Two to four independent Offroad cabinets using the original UDP link.
  * SPDX-License-Identifier: MIT */
 #include "vcthunder.h"
 #include "dual_screen.h"
@@ -15,7 +15,7 @@ static int (__cdecl *s_operator_init)(void);
 int dual_screen_cabinet(void)
 {
     const char *v = getenv("VCT_DUAL_CABINET");
-    return v && (!strcmp(v, "1") || !strcmp(v, "2")) ? v[0] - '0' : 0;
+    return v && v[0] >= '1' && v[0] <= '4' && !v[1] ? v[0] - '0' : 0;
 }
 
 static int __cdecl linked_operator_init(void)
@@ -60,9 +60,18 @@ int dual_screen_run(int argc, char **argv)
     shim_config_t cfg;
     char *filtered[66];
     if (argc > 64) { fprintf(stderr, "Too many arguments.\n"); return 1; }
-    int count = 0;
-    for (int i = 0; i < argc; i++)
-        if (strcmp(argv[i], "--dual-screen")) filtered[count++] = argv[i];
+    int count = 0, players = 2;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--dual-screen")) continue;
+        if (!strcmp(argv[i], "--players")) {
+            if (++i >= argc || argv[i][0] < '2' || argv[i][0] > '4' || argv[i][1]) {
+                fprintf(stderr, "--players requires 2, 3 or 4.\n"); return 1;
+            }
+            players = argv[i][0] - '0';
+            continue;
+        }
+        filtered[count++] = argv[i];
+    }
     filtered[count] = NULL;
     config_defaults(&cfg);
     config_load_shared(&cfg, "vcthunder.ini");
@@ -72,7 +81,7 @@ int dual_screen_run(int argc, char **argv)
     if (strcasecmp(cfg.title, "offroad")) {
         fprintf(stderr, "--dual-screen currently supports Offroad Thunder.\n"); return 1;
     }
-    char saves[2][1024], logs[2][1100], glogs[2][1100], exe[4096];
+    char saves[4][1024], logs[4][1100], glogs[4][1100], exe[4096];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (n <= 0) { perror("/proc/self/exe"); return 1; }
     exe[n] = 0;
@@ -83,8 +92,11 @@ int dual_screen_run(int argc, char **argv)
         SDL_DisplayID *ids = SDL_GetDisplays(&displays);
         SDL_free(ids); SDL_QuitSubSystem(SDL_INIT_VIDEO);
     }
-    printf("Offroad linked cabinets: %s\n", displays >= 2 ? "one per display" : "side by side on one display");
-    for (int i = 0; i < 2; i++) {
+    printf("Offroad: %d linked cabinets; %s\n", players,
+        displays >= players ? "one per display" :
+        displays <= 1 && players > 2 ? "2 x 2 grid on one display" :
+        displays <= 1 ? "side by side on one display" : "tiled across connected displays");
+    for (int i = 0; i < players; i++) {
         if (snprintf(saves[i], sizeof saves[i], "%s/offroad-link/cabinet-%d", cfg.save_dir, i + 1) >= (int)sizeof saves[i]) return 1;
         snprintf(logs[i], sizeof logs[i], "%s/game.log", saves[i]);
         snprintf(glogs[i], sizeof glogs[i], "%s/glide.log", saves[i]);
@@ -93,13 +105,16 @@ int dual_screen_run(int argc, char **argv)
     }
     if (cfg.dry_run) return 0;
     fflush(NULL);
-    pid_t children[2] = {0, 0};
+    pid_t children[4] = {0};
     int result = 0;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < players; i++) {
         children[i] = fork();
         if (!children[i]) {
-            setenv("VCT_DUAL_CABINET", i ? "2" : "1", 1);
-            setenv("VCT_GAMEPAD_INDEX", i ? "1" : "0", 1);
+            char cabinet[] = {(char)('1' + i), 0}, pad[] = {(char)('0' + i), 0};
+            char total[] = {(char)('0' + players), 0};
+            setenv("VCT_DUAL_CABINET", cabinet, 1);
+            setenv("VCT_GAMEPAD_INDEX", pad, 1);
+            setenv("VCT_LINK_PLAYERS", total, 1);
             char *args[80]; int a = 0;
             args[a++] = exe;
             for (int j = 1; j < count; j++) if (strcmp(filtered[j], "--dry-run")) args[a++] = filtered[j];
@@ -113,7 +128,7 @@ int dual_screen_run(int argc, char **argv)
         if (children[i] < 0) { children[i] = 0; perror("fork"); result = 1; goto done; }
     }
     while (!g_linux_quit) {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < players; i++) {
             int status;
             pid_t p = waitpid(children[i], &status, WNOHANG);
             if (p == children[i]) {
@@ -125,8 +140,8 @@ int dual_screen_run(int argc, char **argv)
         SDL_Delay(100);
     }
 done:
-    for (int i = 0; i < 2; i++) if (children[i]) kill(children[i], SIGTERM);
-    for (int i = 0; i < 2; i++) if (children[i]) {
+    for (int i = 0; i < players; i++) if (children[i]) kill(children[i], SIGTERM);
+    for (int i = 0; i < players; i++) if (children[i]) {
         while (waitpid(children[i], NULL, 0) < 0 && errno == EINTR) {}
     }
     return result;

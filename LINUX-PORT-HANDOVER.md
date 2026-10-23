@@ -5,8 +5,9 @@ See [README.md](README.md) and `linux.mk` for current commands. Both titles run
 with SDL input/audio and native Vulkan rendering; Windows build paths have
 been removed. Nuklear supplies in-game settings and first-time import setup.
 `offroad --dual-screen` launches linked cabinets with separate saves and pads;
-one shared race was verified through peer masks and synchronized counters.
-The checks now pass 16 native host tests, eight importer tests, eight CPU
+two- and four-player shared races were verified through peer masks and
+synchronized counters. `offroad --players 4` uses a 2×2 grid on one display.
+The checks now pass 17 native host tests, eight importer tests, eight CPU
 reference frames and ten Vulkan comparison frames. The earlier `mcopy -a`
 sound extraction described below damages binary files and must not be used.
 

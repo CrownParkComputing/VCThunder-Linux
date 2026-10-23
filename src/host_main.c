@@ -24,7 +24,8 @@ int main(int argc, char **argv)
     signal(SIGTERM, request_quit);
     atexit(native_menu_cleanup);
     for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--dual-screen")) return dual_screen_run(argc, argv);
+        if (!strcmp(argv[i], "--dual-screen") || !strcmp(argv[i], "--players"))
+            return dual_screen_run(argc, argv);
     int force_setup = argc == 2 && strcmp(argv[1], "--menu") == 0;
     int preferred = argc == 2 && !strcasecmp(argv[1], "hydro") ? 0 :
                     argc == 2 && !strcasecmp(argv[1], "offroad") ? 1 : -1;

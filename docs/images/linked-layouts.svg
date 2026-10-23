@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="700" viewBox="0 0 1440 700" role="img" aria-labelledby="title desc">
+<title id="title">Two- and four-player Offroad layouts</title><desc id="desc">Two players use side-by-side windows. Four players use a two by two grid. Each player gets a separate game process, pad and save folder, linked locally.</desc>
+<rect width="1440" height="700" rx="22" fill="#091725"/>
+<g font-family="DejaVu Sans, sans-serif"><text x="46" y="62" fill="#ecf5ff" font-size="32" font-weight="700">One Linux PC. Up to four linked cabinets.</text><text x="46" y="98" fill="#9cb4c8" font-size="20">Layout diagram · four independent game views, joined by the original local cabinet link</text>
+<rect x="46" y="135" width="650" height="350" rx="16" fill="#112638" stroke="#2d4b60"/><rect x="744" y="135" width="650" height="350" rx="16" fill="#112638" stroke="#2d4b60"/>
+<text x="72" y="177" fill="#f0f7ff" font-size="24" font-weight="700">2 PLAYERS</text><text x="770" y="177" fill="#f0f7ff" font-size="24" font-weight="700">4 PLAYERS</text>
+<g font-size="19" font-weight="700" text-anchor="middle"><rect x="72" y="204" width="285" height="183" rx="10" fill="#123a40" stroke="#60dfcf"/><text x="214" y="278" fill="#73eadb">PLAYER 1</text><text x="214" y="310" fill="#c0e7e2" font-size="16" font-weight="400">pad 1 · cabinet 1</text>
+<rect x="385" y="204" width="285" height="183" rx="10" fill="#20394e" stroke="#75baff"/><text x="527" y="278" fill="#91caff">PLAYER 2</text><text x="527" y="310" fill="#c4daed" font-size="16" font-weight="400">pad 2 · cabinet 2</text>
+<rect x="770" y="204" width="285" height="105" rx="10" fill="#123a40" stroke="#60dfcf"/><text x="912" y="245" fill="#73eadb">PLAYER 1</text><text x="912" y="276" fill="#c0e7e2" font-size="16" font-weight="400">pad 1 · cabinet 1</text>
+<rect x="1083" y="204" width="285" height="105" rx="10" fill="#20394e" stroke="#75baff"/><text x="1225" y="245" fill="#91caff">PLAYER 2</text><text x="1225" y="276" fill="#c4daed" font-size="16" font-weight="400">pad 2 · cabinet 2</text>
+<rect x="770" y="326" width="285" height="105" rx="10" fill="#3d3020" stroke="#ffd07b"/><text x="912" y="367" fill="#ffd07b">PLAYER 3</text><text x="912" y="398" fill="#e9d6b7" font-size="16" font-weight="400">pad 3 · cabinet 3</text>
+<rect x="1083" y="326" width="285" height="105" rx="10" fill="#392c46" stroke="#d9a0fc"/><text x="1225" y="367" fill="#d9a0fc">PLAYER 4</text><text x="1225" y="398" fill="#e1ccea" font-size="16" font-weight="400">pad 4 · cabinet 4</text></g>
+<text x="72" y="445" fill="#c5d8e6" font-size="19">One screen: side by side. Two screens: one each.</text>
+<text x="770" y="465" fill="#c5d8e6" font-size="19">One screen: 2×2. Extra displays share the players.</text>
+<rect x="46" y="515" width="1348" height="137" rx="16" fill="#112638" stroke="#2d4b60"/>
+<g font-size="20" fill="#eef6fc" font-weight="600"><text x="73" y="554">LOCAL LINK</text><text x="430" y="554">SEPARATE SAVES</text><text x="879" y="554">INDEPENDENT INPUT</text></g>
+<g font-size="18" fill="#9cb4c8"><text x="73" y="589">Original cabinet UDP protocol</text><text x="73" y="618">All traffic stays on this PC</text><text x="430" y="589">save/offroad-link/cabinet-1…4/</text><text x="430" y="618">Automatic unit IDs and linked mode</text><text x="879" y="589">Each pad belongs to one cabinet</text><text x="879" y="618">Keyboard follows the focused window</text></g></g></svg>

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "window_posix.h"
+#include "cabinet_layout.h"
 
 struct posix_window {
     SDL_Window *sdl;
@@ -123,26 +124,30 @@ static posix_window *resolve(HWND h)
 BOOL posix_window_place_cabinet(HWND h)
 {
     const char *value = getenv("VCT_DUAL_CABINET");
-    if (!value || (strcmp(value, "1") && strcmp(value, "2"))) return FALSE;
+    if (!value || value[0] < '1' || value[0] > '4' || value[1]) return FALSE;
     posix_window *win = resolve(h);
     if (!win) return FALSE;
     if (win->cabinet_placed) return TRUE;
+    const char *total = getenv("VCT_LINK_PLAYERS");
+    int players = total && total[0] >= '2' && total[0] <= '4' && !total[1] ? total[0] - '0' : 2;
     int cabinet = value[0] - '1', count = 0;
     SDL_DisplayID *ids = SDL_GetDisplays(&count);
     SDL_Rect area;
-    if (!ids || !count || !SDL_GetDisplayUsableBounds(ids[count > 1 ? cabinet : 0], &area)) {
+    cabinet_layout_t layout;
+    if (!ids || !cabinet_layout(players, cabinet, count, &layout) ||
+        !SDL_GetDisplayUsableBounds(ids[layout.display], &area)) {
         SDL_free(ids); return FALSE;
     }
     SDL_SetWindowFullscreen(win->sdl, false);
     SDL_SetWindowBordered(win->sdl, false);
-    if (count == 1) {
-        int half = area.w / 2;
-        area.x += half * cabinet;
-        area.w = cabinet ? area.w - half : half;
-    }
+    int x = area.w * layout.column / layout.columns;
+    int y = area.h * layout.row / layout.rows;
+    int right = area.w * (layout.column + 1) / layout.columns;
+    int bottom = area.h * (layout.row + 1) / layout.rows;
+    area.x += x; area.y += y; area.w = right - x; area.h = bottom - y;
     SDL_SetWindowPosition(win->sdl, area.x, area.y);
     SDL_SetWindowSize(win->sdl, area.w, area.h);
-    if (count > 1) SDL_SetWindowFullscreen(win->sdl, true);
+    if (layout.on_display == 1) SDL_SetWindowFullscreen(win->sdl, true);
     char title[96];
     snprintf(title, sizeof title, "Offroad Thunder - Linked cabinet %d", cabinet + 1);
     SDL_SetWindowTitle(win->sdl, title);
