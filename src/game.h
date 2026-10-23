@@ -9,6 +9,7 @@
 #define VCT_GAME_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* Ceilings for statically sized arrays. Generous on purpose: they cost 4-8 bytes
  * an entry and the alternative is a heap allocation for a table that never
@@ -221,6 +222,7 @@ typedef struct game_profile {
 
     /* The arcade link. See net_link_disable() in win32_bind.c. */
     uint32_t network_enable, network_enabled;
+    uint32_t operator_init, operator_settings, hook_operator_init;
 
     /* ether0, which is three functions and not a chipset: both titles ask ETS
      * for the device by name, read its 0x3a byte configuration block for the

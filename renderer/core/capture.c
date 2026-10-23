@@ -5,7 +5,7 @@
  * Pointer identities are retained for state-buffer pairing. Capture is not a
  * performance-neutral mode.
  */
-#include <windows.h>
+#include "platform.h"
 #include <stdio.h>
 #include <string.h>
 

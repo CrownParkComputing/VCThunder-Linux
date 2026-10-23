@@ -71,6 +71,10 @@ void ini_doc_free(ini_doc_t *doc)
 int ini_doc_load(ini_doc_t *doc, const char *path)
 {
     FILE *fp;
+    char native_path[MAX_PATH];
+    if (!posix_norm(native_path, sizeof native_path, path))
+        return 0;
+    path = native_path;
     char *data;
     long size;
     size_t at = 0;

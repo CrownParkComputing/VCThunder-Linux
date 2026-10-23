@@ -516,7 +516,7 @@ int main(void)
              (int)(sizeof folder - sizeof "VCThunder-roles-" - 12), root,
              GetCurrentProcessId());
     CreateDirectoryA(folder, NULL);
-    snprintf(s_path, sizeof s_path, "%s\\vcthunder.ini", folder);
+    snprintf(s_path, sizeof s_path, "%s/vcthunder.ini", folder);
 
     test_axis_ref();
     test_unlabelled();

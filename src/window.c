@@ -10,6 +10,12 @@
 #include "resource.h"
 #include "bezel.h"
 
+/* vcthunder.h above pulled in posix_compat.h instead of <windows.h>; this is
+ * the rest of the surface this file speaks -- RECT, the message constants, and
+ * the window calls. See window_posix.h for why Linux owns a window here rather
+ * than adopting the game's. */
+#include "window_posix.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,7 +25,6 @@
 
 static HWND s_hwnd;
 static HWND s_branded;               /* the handle the name and icon went on */
-static HICON s_icon_big, s_icon_small;
 static int  s_view_w, s_view_h;      /* the game's visible raster */
 static int  s_seen, s_gone;
 
@@ -36,44 +41,6 @@ typedef struct {
 
 /* Load the icon from this DLL because mapping the game overwrites the
  * executable's resource headers. Resolve the module by address without loading. */
-static HICON load_icon(int cx, int cy)
-{
-    HMODULE self = NULL;
-
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCSTR)(uintptr_t)&load_icon, &self) || !self)
-        return NULL;
-    /* LR_SHARED: the system keeps the cached copy for the life of the process
-     * and it must not be destroyed. That is exactly the lifetime a window icon
-     * needs, since the window outlives every call made from here. */
-    return (HICON)LoadImageA(self, MAKEINTRESOURCEA(IDI_VCTHUNDER), IMAGE_ICON,
-                             cx, cy, LR_SHARED | LR_DEFAULTCOLOR);
-}
-
-/* BOTH SIZES, OR THE BRANDING IS HALF DONE: the caption reads ICON_SMALL while
- * the taskbar and Alt-Tab read ICON_BIG, so setting one of them leaves the
- * other showing the backend's default. The metrics are asked for rather than
- * assumed to be 16 and 32, because they are not on a scaled display. */
-static void apply_icon(HWND hwnd)
-{
-    static int loaded;
-
-    if (!loaded) {
-        loaded = 1;
-        s_icon_big = load_icon(GetSystemMetrics(SM_CXICON),
-                               GetSystemMetrics(SM_CYICON));
-        s_icon_small = load_icon(GetSystemMetrics(SM_CXSMICON),
-                                 GetSystemMetrics(SM_CYSMICON));
-        if (!s_icon_big && !s_icon_small)
-            LOGW("window: no icon in VCThunder.dll (%lu); keeping the "
-                 "backend's", GetLastError());
-    }
-    if (s_icon_big)
-        SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)s_icon_big);
-    if (s_icon_small)
-        SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)s_icon_small);
-}
 
 /* Keep configuration as the sole owner of client size. Apply the fixed-size
  * style to every backend window and refresh its non-client frame immediately. */
@@ -102,8 +69,8 @@ static void apply_identity(HWND hwnd, int force)
 
     if (!hwnd || (hwnd == s_branded && !force))
         return;
+    if (posix_window_place_cabinet(hwnd)) return;
     apply_fixed_style(hwnd);
-    apply_icon(hwnd);
     /* Match the renderer's title format before frame-rate reporting begins. */
     if (G && G->id && G->id[0]) {
         char name[32];
@@ -225,7 +192,7 @@ int window_input_focused(void)
     DWORD pid = 0;
     HWND foreground;
 
-    if (g_cfg.input_background)
+    if (g_cfg.input_background && !getenv("VCT_DUAL_CABINET"))
         return 1;
     foreground = GetForegroundWindow();
     if (!foreground)
@@ -552,9 +519,11 @@ void window_set_fullscreen(int on)
         s_saved_style = GetWindowLongA(hwnd, GWL_STYLE);
         s_saved_ex    = GetWindowLongA(hwnd, GWL_EXSTYLE);
         s_fullscreen  = 1;
+        posix_window_fullscreen(hwnd, 1);
         apply_fullscreen(hwnd);
     } else {
         s_fullscreen = 0;
+        posix_window_fullscreen(hwnd, 0);
         leave_fullscreen(hwnd);
         window_sync(1);
     }
@@ -604,6 +573,7 @@ void window_sync(int force)
     UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED |
                  SWP_NOSENDCHANGING;
 
+    if (posix_window_place_cabinet(hwnd)) return;
     apply_fixed_style(hwnd);
     if (!hwnd || !s_view_w || !GetClientRect(hwnd, &client) ||
         !GetWindowRect(hwnd, &window))
@@ -667,11 +637,10 @@ void window_sync(int force)
         if (GetClientRect(hwnd, &client) &&
             (client.right - client.left != tw ||
              client.bottom - client.top != th))
-            LOGW("window: the backend kept the client at %ldx%ld after a "
-                 "successful resize to %dx%d: it is answering "
-                 "WM_GETMINMAXINFO with a size of its own",
+            LOGI("window: desktop chose a %ldx%ld client; presentation keeps "
+                 "the configured aspect ratio",
                  (long)(client.right - client.left),
-                 (long)(client.bottom - client.top), tw, th);
+                 (long)(client.bottom - client.top));
     } else {
         LOGW("window: SetWindowPos for %dx%d (scale %dx) failed (%lu)",
              tw, th, scale, GetLastError());
@@ -694,6 +663,10 @@ void window_geometry(int view_w, int view_h)
      * same reason, and are forced, because a mode request is exactly when a
      * provider may redress a window it decided to keep. */
     apply_identity(window_game(), 1);
+    if (getenv("VCT_DUAL_CABINET")) {
+        window_sync(1);
+        return;
+    }
     if (g_cfg.fullscreen && !s_fullscreen)
         window_set_fullscreen(1);
     else

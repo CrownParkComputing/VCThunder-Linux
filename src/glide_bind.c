@@ -9,12 +9,19 @@
 #include "bezel.h"
 #include "ini.h"
 
+#include "window_posix.h"
+#include "../menu/native_menu.h"
+#include <signal.h>
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 static HMODULE s_glide;
 static char    s_path[MAX_PATH];
+static const char *(__stdcall *s_renderer_name)(void);
+const char *glide_renderer_name(void)
+{ return s_renderer_name ? s_renderer_name() : "Unknown"; }
 /* The provider's health, asked once per frame. NULL when the provider does not
  * export it, which is how an older vcglide.dll beside a newer host behaves:
  * the check is skipped, not faked. Anything but 0 is a fault; the provider's
@@ -60,6 +67,7 @@ static int close_requested(const MSG *msg)
 
 static int escape_down(void)
 {
+    if (native_menu_blocks_input()) return 0;
     return (GetAsyncKeyState(VK_ESCAPE) & 0x8000) && window_input_focused();
 }
 
@@ -333,7 +341,15 @@ static int gl_sst_win_open(uintptr_t hwnd, int resolution, int refresh,
             ? GLIDE_RESOLUTION[resolution].width : 0);
     /* Recompute the widescreen origin for each newly opened surface. */
     ws_settle(s_native_lfb_width, s_view_width);
-    window_set_hwnd((HWND)hwnd);
+    {
+        static posix_window *win;
+        if (!win && !posix_window_create(s_view_width, s_view_height, G->name, &win)) {
+            LOGE("window: could not create the Linux game window");
+            return 0;
+        }
+        window_set_hwnd(posix_window_handle(win));
+        hwnd = (uintptr_t)posix_window_sdl(win);
+    }
     result = s_real_win_open ? s_real_win_open(hwnd, surface, refresh,
                  color_format, origin, color_buffers, aux_buffers) : 0;
     window_geometry(s_view_width, s_view_height);
@@ -589,7 +605,7 @@ static void vcglide_init(void)
  * headers and LoadLibrary stops working (see win32_preload). */
 int glide_preload(void)
 {
-    static const char dll[] = "vcglide.dll";
+    static const char dll[] = "libvcglide.so";
     char here[MAX_PATH], *slash;
 
     vcglide_configure();
@@ -597,7 +613,9 @@ int glide_preload(void)
     /* Prefer the dll sitting next to the exe, so a portable pack is
      * self-contained and does not pick up a system-wide Glide DLL. */
     if (GetModuleFileNameA(NULL, here, sizeof here)) {
-        slash = strrchr(here, '\\');
+        slash = strrchr(here,
+                       '/'
+                       );
         snprintf(slash ? slash + 1 : here,
                  sizeof here - (size_t)(slash ? slash + 1 - here : 0), "%s", dll);
         s_glide = LoadLibraryA(here);
@@ -616,6 +634,14 @@ int glide_preload(void)
     }
     LOGI("glide: loaded '%s' at %p", s_path, (void *)s_glide);
     vcglide_init();
+    s_renderer_name = (const char *(__stdcall *)(void))(uintptr_t)GetProcAddress(s_glide, "vglRenderer");
+    typedef void (__stdcall *overlay_set_fn)(int (*)(void *, int, int));
+    overlay_set_fn overlay = (overlay_set_fn)(uintptr_t)GetProcAddress(s_glide, "vglSetOverlay");
+    if (overlay) overlay(native_menu_draw);
+    typedef void (__stdcall *overlay_event_set_fn)(void (*)(const void *));
+    overlay_event_set_fn overlay_event = (overlay_event_set_fn)(uintptr_t)GetProcAddress(s_glide, "vglSetOverlayEventHandler");
+    if (overlay_event) overlay_event(native_menu_event);
+    posix_window_set_event_handler(native_menu_event);
     return 1;
 }
 
@@ -1424,6 +1450,9 @@ static void gl_buffer_swap(int interval)
 {
     MSG msg;
     LARGE_INTEGER before = { 0 }, after = { 0 };
+    extern volatile sig_atomic_t g_linux_quit;
+    if (g_linux_quit)
+        shim_exit(0, "termination requested");
 
     ws_frame_boundary();
     /* Both titles fill their checksum cells during module init, well before

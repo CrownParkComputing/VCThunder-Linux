@@ -29,7 +29,10 @@ static void stderr_off(void)
 {
     fflush(stderr);
     s_saved_stderr = _dup(_fileno(stderr));
-    freopen("NUL", "w", stderr);
+    /* "NUL" is the Win32 null device. On POSIX it is an ordinary relative
+     * filename, so freopen() would create a real file called NUL in the
+     * repository root instead of discarding the output. */
+    freopen("/dev/null", "w", stderr);
 }
 
 static void stderr_on(void)
@@ -516,7 +519,7 @@ int main(void)
              (int)(sizeof folder - sizeof "VCThunder-config-" - 12),
              root, GetCurrentProcessId());
     CreateDirectoryA(folder, NULL);
-    snprintf(s_path, sizeof s_path, "%s\\vcthunder.ini", folder);
+    snprintf(s_path, sizeof s_path, "%s/vcthunder.ini", folder);
 
     test_defaults_are_all_legal();
     test_absent_file();

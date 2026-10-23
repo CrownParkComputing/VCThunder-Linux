@@ -4,6 +4,7 @@
 # Game material, so it can never be committed; the extension bans below would
 # catch most of it, but this is the rule that is actually meant.
 /data/
+/save/
 
 # Written by `make pack`, always, in whichever tree the build ran. It is the
 # user's: tuned ini, both dumps, NVRAM, and none of it is reproducible from this
@@ -12,6 +13,18 @@
 /run/
 
 *.log
+*.log.*
+*.ini.bak
+
+# Recreated from the checked-in INI and importer sources by the native build.
+/generated/default_ini_data.c
+/generated/import_linux_data.c
+
+# Generated menu shader artifacts, compiled from menu/*.vert / menu/*.frag by
+# `make menu` (glslc -> SPIR-V, then xxd -> embedded header).
+menu/*.spv
+menu/shader_vert_spv.h
+menu/shader_frag_spv.h
 
 # Snapshots belong in git history, not in the tree.
 /archive/

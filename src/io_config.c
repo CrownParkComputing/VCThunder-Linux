@@ -580,6 +580,13 @@ static void controls_load_ini(const char *path)
 
     s_cfg.provider = ini_provider(path);
     s_cfg.xinput_device = ini_unsigned(path, "analog", "xinput_device", 0);
+    const char *cabinet_pad = getenv("VCT_GAMEPAD_INDEX");
+    if (cabinet_pad && (!strcmp(cabinet_pad, "0") || !strcmp(cabinet_pad, "1"))) {
+        s_cfg.xinput_device = (unsigned)(cabinet_pad[0] - '0');
+        /* A missing second pad must not fall back to WinMM device 0 and
+         * drive both cabinets from the first player's controller. */
+        s_cfg.provider = PROVIDER_XINPUT;
+    }
     s_cfg.winmm_device = ini_unsigned(path, "analog", "winmm_device", 0);
     s_cfg.deadzone_percent = ini_unsigned(path, "analog", "deadzone_percent", 12);
     if (s_cfg.deadzone_percent > 49)

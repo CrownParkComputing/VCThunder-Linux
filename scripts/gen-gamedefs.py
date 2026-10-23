@@ -446,6 +446,8 @@ ANCHORS = [
     # other ~50 readers already handle.
     ("network_enable",   ["_network_Enable"],   "the only writer of _Network_bEnabled"),
     ("network_enabled",  ["_Network_bEnabled"], "0 = standalone; read by ~50 sites"),
+    ("operator_init", ["_operator_ModuleInit"], "operator settings before GameInit"),
+    ("operator_settings", ["_OperatorSettings"], "cabinet operator settings"),
     # ether0 itself, and it is three functions rather than a chipset. Both
     # titles use exactly these: name to handle, read the 0x3a byte
     # configuration block, write it back with 192.168.200.<unit + 10> in it.
@@ -1578,6 +1580,7 @@ def d_hooks(t, log):
     exactly as it does for an absent address."""
     d = t.read()
     sites = [
+        ("hook_operator_init", "_operator_ModuleInit"),
         ("hook_init3dfx",        "_init3dfx_Init"),
         ("hook_queryhwcaps",     "_hardware_caps_driver_QueryHardwareCaps"),
         ("hook_viewport_init",   "_viewport_InitToFullScreen"),
@@ -2158,6 +2161,7 @@ def emit(t, tables, log):
         log(f"ERROR: HUD text table has {len(hud_txt)} entries, ceiling is {MAX['hudtext']}")
         tables["over"].append(("hudtext", len(hud_txt), MAX["hudtext"]))
     derived = [
+        ("hook_operator_init", hooks["hook_operator_init"], "operator init prologue: len | reloc<<8"),
         ("hook_init3dfx", hooks["hook_init3dfx"],
          "_init3dfx_Init prologue: len | reloc<<8"),
         ("hook_queryhwcaps", hooks["hook_queryhwcaps"],

@@ -1226,9 +1226,12 @@ const game_profile_t g_profile_offroad = {
     .dsound_is_playing = 0x00150CEC,          /* _dsound_IsCookiePLaying: pass-through returns true forever; silent fallback replaces it with completion */
     .network_enable = 0x001044B8,             /* _network_Enable: the only writer of _Network_bEnabled */
     .network_enabled = 0x0023F734,            /* _Network_bEnabled: 0 = standalone; read by ~50 sites */
+    .operator_init = 0x0018C3CC,              /* _operator_ModuleInit: operator settings before GameInit */
+    .operator_settings = 0x00474314,          /* _OperatorSettings: cabinet operator settings */
     .ets_tcp_get_device_handle = 0x001215B4,  /* _EtsTCPGetDeviceHandle: name -> device handle; 0 is what makes both link stacks give up */
     .ets_tcp_get_device_cfg = 0x001215C8,     /* _EtsTCPGetDeviceCfg: handle -> 0x3a byte config block; +0x18 is the IPv4 address */
     .ets_tcp_configure_device = 0x00121960,   /* _EtsTCPConfigureDevice: writes the block back; 0 = success, which is what Offroad tests */
+    .hook_operator_init = 0x00000005,         /* operator init prologue: len | reloc<<8 */
     .hook_init3dfx = 0x00000006,              /* _init3dfx_Init prologue: len | reloc<<8 */
     .hook_queryhwcaps = 0x00000509,           /* _hardware_caps_driver_QueryHardwareCaps prologue: len | reloc<<8 */
     .hook_viewport_init = 0x00000007,         /* _viewport_InitToFullScreen prologue: len | reloc<<8 */

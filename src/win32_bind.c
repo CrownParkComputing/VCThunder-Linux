@@ -1,4 +1,4 @@
-/* win32_bind.c -- replace the ETS Win32 boundary with native Windows exports.
+/* win32_bind.c -- bind the original ETS import ABI to native Linux services.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * Import slots are rewritten directly and remaining entry points receive
@@ -9,11 +9,11 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <objbase.h>
 
-static const char *const MODULES[] = {
-    "kernel32.dll", "user32.dll", "ws2_32.dll", "ntdll.dll"
-};
+/* The Linux half of the ETS kernel boundary: resolves the names this file would
+ * otherwise GetProcAddress out of kernel32/user32. See win32_posix.c. */
+#include "win32_posix.h"
+#include "netsock_posix.h"
 
 /* Decorated functions implemented by the game rather than ETS. Offroad's
  * joyGetPosEx@8 reads its cabinet I/O board and must not bind to WinMM. */
@@ -31,28 +31,6 @@ static const char *never_bind(const char *decorated)
             return NEVER_BIND[i].why;
     return NULL;
 }
-#define NMODULES (int)(sizeof MODULES / sizeof MODULES[0])
-
-/* Not used for symbol resolution: loaded purely so they are already resident
- * before the game image lands on our PE headers and LoadLibrary stops working.
- *
- * This list exists because of a real crash: a Glide provider that brings up
- * D3D through COM lazily, on the first Glide call, does it long after the headers
- * are gone. The fault landed in combase.dll reading 0x64 off a null pointer.
- * Anything the Glide backend might pull in has to be resident up front. */
-static const char *const SUPPORT[] = {
-    "ole32.dll", "combase.dll", "oleaut32.dll", "advapi32.dll", "gdi32.dll",
-    "shell32.dll", "shcore.dll", "version.dll", "imm32.dll",
-    "dxgi.dll", "d3d11.dll", "d3d9.dll", "d3dcompiler_47.dll", "dwmapi.dll",
-    "setupapi.dll", "cfgmgr32.dll", "bcrypt.dll", "winmm.dll",
-    /* WASAPI. audio_preload() opens the endpoint before the headers go, which
-     * loads these anyway; listed so a device that appears later cannot try. */
-    "mmdevapi.dll", "audioses.dll", "avrt.dll",
-};
-#define NSUPPORT (int)(sizeof SUPPORT / sizeof SUPPORT[0])
-
-static HMODULE s_mod[NMODULES];
-
 /* ---- overrides: entries that need shim behaviour, not passthrough -------- */
 
 static HANDLE WINAPI ov_CreateFileA(LPCSTR name, DWORD access, DWORD share,
@@ -546,25 +524,6 @@ void *win32_game_cs(unsigned i) { return s_game_cs[i]; }
 
 /* Slots are written before the count that publishes them, so a reader on
  * another thread never sees an empty one. */
-static VOID WINAPI ov_InitializeCriticalSection(LPCRITICAL_SECTION cs)
-{
-    LONG i, n;
-
-    AcquireSRWLockExclusive(&s_mem_lock);
-    n = s_game_css;
-    for (i = 0; i < n; i++)
-        if (s_game_cs[i] == cs)
-            break;
-    if (i == n && n < GAME_CS_MAX) {
-        s_game_cs[n] = cs;
-        MemoryBarrier();
-        s_game_css = n + 1;
-    }
-    ReleaseSRWLockExclusive(&s_mem_lock);
-    if (i == n && n == GAME_CS_MAX)
-        mem_lost("CRITICAL_SECTIONs");
-    InitializeCriticalSection(cs);
-}
 
 static HANDLE WINAPI ov_HeapCreate(DWORD options, SIZE_T initial, SIZE_T max)
 {
@@ -630,7 +589,6 @@ static const struct { const char *name; void *fn; } OVERRIDE[] = {
     { "VirtualProtect",        (void *)ov_VirtualProtect        },
     { "HeapCreate",            (void *)ov_HeapCreate            },
     { "HeapDestroy",           (void *)ov_HeapDestroy           },
-    { "InitializeCriticalSection", (void *)ov_InitializeCriticalSection },
     { "HeapAlloc",             (void *)ov_HeapAlloc             },
     { "HeapFree",              (void *)ov_HeapFree              },
     { "HeapReAlloc",           (void *)ov_HeapReAlloc           },
@@ -684,13 +642,14 @@ static void *resolve(const char *decorated, const char **whence)
             return p;
         }
     }
-    for (i = 0; i < NMODULES; i++) {
-        void *p;
-        if (!s_mod[i])
-            continue;
-        p = (void *)GetProcAddress(s_mod[i], base);
+    /* On Linux there is no kernel32 to GetProcAddress; the same names resolve
+     * against win32_posix.c's implementations (handover item 10). */
+    {
+        void *p = win32_posix_resolve(base);
+        if (!p)
+            p = netsock_posix_resolve(base);
         if (p) {
-            *whence = MODULES[i];
+            *whence = "posix";
             return p;
         }
     }
@@ -698,45 +657,11 @@ static void *resolve(const char *decorated, const char **whence)
     return NULL;
 }
 
-/* MUST be called before game_map(). Mapping the game overwrites this process's
- * own PE headers: the span is VCThunder.exe's image (src/stub.c) and the
- * game's CODE starts at 0x1006b0, inside the header page. Windows tolerates that
- * remarkably well: GetProcAddress, GetModuleFileName and malloc all keep
- * working. LoadLibrary does not. So every DLL we will ever need has to be
- * resolved while the headers are still intact. Measured, not assumed. */
+/* The ETS import ABI is resolved against native Linux implementations. */
 int win32_preload(void)
 {
-    int ok = 0, i;
-
-    for (i = 0; i < NMODULES; i++) {
-        s_mod[i] = LoadLibraryA(MODULES[i]);
-        if (s_mod[i])
-            ok++;
-        else
-            LOGE("LoadLibrary('%s') failed %lu: must succeed BEFORE the game "
-                 "image is mapped", MODULES[i], GetLastError());
-    }
-    for (i = 0; i < NSUPPORT; i++) {
-        /* Best effort: several of these are optional depending on the backend
-         * and the Windows edition, so a miss is logged at trace level only. */
-        if (!LoadLibraryA(SUPPORT[i]))
-            LOGT("win32: support module '%s' unavailable", SUPPORT[i]);
-    }
-
-    /* Initialise COM on this thread while the image is still intact: the game
-     * runs on this same thread, so this is the apartment the Glide backend finds
-     * when it brings up D3D. MULTITHREADED, not APARTMENTTHREADED: DXGI on an STA
-     * deadlocks, which is what an earlier APARTMENTTHREADED attempt did (four
-     * live threads, zero windows, stuck inside grSstWinOpen). */
-    {
-        HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-        LOGI("win32: CoInitializeEx -> 0x%08lX%s", (unsigned long)hr,
-             (hr == S_OK || hr == S_FALSE) ? " (ok)" : " (FAILED)");
-    }
-
-    LOGI("win32: pre-loaded %d/%d core + %d support modules",
-         ok, NMODULES, NSUPPORT);
-    return ok == NMODULES;
+    LOGI("ETS imports: native POSIX/SDL implementations; no system DLLs");
+    return 1;
 }
 
 /* Count ETS-to-Windows calls with minimal instrumentation and no argument or
@@ -782,9 +707,6 @@ int win32_bind(void)
     int bound = 0, unresolved = 0;
     unsigned i;
 
-    for (i = 0; i < NMODULES; i++)
-        if (!s_mod[i])
-            LOGE("win32_bind: '%s' was never pre-loaded", MODULES[i]);
 
     /* 98 indirect entries: overwrite the pointer, leave the code alone. */
     for (i = 0; i < G->imp_count; i++) {

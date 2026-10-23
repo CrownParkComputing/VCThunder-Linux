@@ -3,9 +3,9 @@
  *
  * A single entries.def list defines indices, descriptors, stubs, and linker
  * exports. The host supplies configuration through environment variables before
- * loading this DLL; calls may also be captured for deterministic replay.
+ * loading this native shared library; calls may also be captured for replay.
  */
-#include <windows.h>
+#include "platform.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +32,6 @@ int vgl_ready;
 int vgl_capturing;
 int vgl_surface_w, vgl_surface_h;
 
-static HMODULE  s_self;
 static FILE    *s_log;
 static unsigned s_frame;
 
@@ -97,6 +96,11 @@ void vgl_log_capped(unsigned *seen, unsigned max, const char *fmt, ...)
 void vgl_window_title(char *buf, size_t n, double fps)
 {
     char name[32];
+    const char *cabinet = getenv("VCT_DUAL_CABINET");
+    if (cabinet && (!strcmp(cabinet, "1") || !strcmp(cabinet, "2"))) {
+        snprintf(buf, n, "Offroad Thunder - Linked cabinet %s (%.1f fps)", cabinet, fps);
+        return;
+    }
 
     snprintf(name, sizeof name, "%s", vgl_cfg.title);
     if (name[0] >= 'a' && name[0] <= 'z')
@@ -147,7 +151,7 @@ static unsigned cfg_num(const char *var, unsigned dflt)
 }
 
 /* Preload renderer dependencies before the host maps over its PE headers.
- * Keep the explicit entry idempotent and avoid loading under DllMain's lock. */
+ * Keep the explicit entry idempotent for native shared-library callers. */
 void __stdcall vglInit(void)
 {
     vgl_init();
@@ -159,6 +163,11 @@ void __stdcall vglInit(void)
 int __stdcall vglHealth(void)
 {
     return vgl_gpu_lost() ? VGL_HEALTH_DEVICE_LOST : VGL_HEALTH_OK;
+}
+
+const char *__stdcall vglRenderer(void)
+{
+    return vgl.gpu ? "Vulkan" : "CPU";
 }
 
 /* The host is about to draw a picture it will throw away, and then has. */
@@ -399,7 +408,10 @@ void vgl_destination_rect(int fullscreen, int raster_w, int raster_h,
     *x = *y = 0;
     *w = client_w;
     *h = client_h;
-    if (!fullscreen || client_w <= 0 || client_h <= 0)
+    /* A Linux compositor may tile or resize the window independently of the
+     * requested dimensions. Preserve the picture's aspect in every window. */
+    (void)fullscreen;
+    if (client_w <= 0 || client_h <= 0)
         return;
     if (_stricmp(vgl_cfg.aspect, "stretch") == 0)
         goto report;
@@ -530,9 +542,10 @@ void vgl_dump_frame(unsigned frame)
         /* %.*s: vgl_cfg.frames is itself a full-width path, so bound the
            directory and let the filename always survive. The reservation is
            for a 10-digit frame number, not the 5 that %05u implies: %05u is
-           a minimum width, and past 99999 it simply gets wider. */
-        snprintf(path, sizeof path, "%.*s\\frame%05u.png",
-                 (int)(sizeof path - sizeof "\\frame.png" - 10),
+           a minimum width, and past 99999 it simply gets wider. The separator
+           is the host's, and for the reason recorded at VGL_DIR_SEP. */
+        snprintf(path, sizeof path, "%.*s" VGL_DIR_SEP "frame%05u.png",
+                 (int)(sizeof path - sizeof VGL_DIR_SEP "frame.png" - 10),
                  vgl_cfg.frames, frame);
         if (!png_write565(path, px, w, h, w))
             vgl_log(0, "frames: cannot write %s", path);
@@ -684,15 +697,10 @@ int __stdcall grLfbReadRegion(uint32_t a0, uint32_t a1, uint32_t a2,
 
 /* Nothing here but bookkeeping. See vglInit for why the graphics runtime is
  * not brought up from under the loader lock. */
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+__attribute__((destructor)) static void vgl_shutdown(void)
 {
-    (void)reserved;
-    if (reason == DLL_PROCESS_ATTACH) {
-        s_self = (HMODULE)inst;
-        DisableThreadLibraryCalls(inst);
-    } else if (reason == DLL_PROCESS_DETACH) {
         if (vgl_capturing)
-            vgl_cap_close("process detach");
+            vgl_cap_close("process exit");
         if (s_log) {
             char line[256];
             int n, k;
@@ -733,6 +741,4 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             fclose(s_log);
             s_log = NULL;
         }
-    }
-    return TRUE;
 }

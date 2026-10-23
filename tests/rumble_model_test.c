@@ -9,7 +9,11 @@
  * pinned timeline. No game data, no dump, no profile: rumble.c is included
  * whole so the test can drive rumble_step() directly.
  */
-#include <direct.h>
+/* Linux: _chdir is spelled chdir(2) and comes from <unistd.h>, which
+ * src/posix_compat.h -- reached through vcthunder.h, below -- already pulls
+ * in. <direct.h> itself is an MSVCRT header with no counterpart here. */
+#include <unistd.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

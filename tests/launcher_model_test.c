@@ -40,6 +40,8 @@ static void ini_path_for(const char *name, char *out, size_t out_size)
 
 static int write_bytes(const char *path, const char *data)
 {
+    char native_path[MAX_PATH];
+    path = posix_norm(native_path, sizeof native_path, path);
     FILE *fp = fopen(path, "wb");
     size_t size = strlen(data);
     int ok = fp && fwrite(data, 1, size, fp) == size;
@@ -50,6 +52,8 @@ static int write_bytes(const char *path, const char *data)
 
 static char *read_bytes(const char *path)
 {
+    char native_path[MAX_PATH];
+    path = posix_norm(native_path, sizeof native_path, path);
     FILE *fp = fopen(path, "rb");
     long size;
     char *data;

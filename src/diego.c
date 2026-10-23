@@ -10,6 +10,7 @@
  */
 #include "vcthunder.h"
 #include "io.h"
+#include "posix_threads.h"
 
 #include <stdio.h>
 #include <string.h>

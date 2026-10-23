@@ -7,7 +7,7 @@
 #ifndef SHIM_H
 #define SHIM_H
 
-#include <windows.h>
+#include "posix_compat.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -452,6 +452,7 @@ int  stubs_install_m1(void);
 /* Load the bundled vcglide.dll. MUST run before game_map(), like
  * win32_preload(). There is no alternate runtime provider. */
 int  glide_preload(void);
+const char *glide_renderer_name(void);
 
 /* Redirect all 66 _gr* entry points at the wrapper through cdecl->stdcall
  * thunks. Run AFTER stubs_install_m1(), which stubs them as a fallback. */
@@ -647,6 +648,7 @@ int  audio_install(void);
  * DATA cell. See audio.c. */
 int  audio_install_passthrough(void);
 void audio_shutdown(void);
+void audio_update_output(unsigned volume, const char *routing, unsigned balance);
 
 /* ------------------------------------------------------ audio_offroad.c: */
 

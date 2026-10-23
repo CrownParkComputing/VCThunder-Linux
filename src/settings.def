@@ -434,7 +434,7 @@ SETTING("link", "link_rx_budget",
         STORE(VCT_STORE_UINT, link_rx_budget, "64", NULL, 1, 4096),
         SHOW(PAGE_LINK, "Receive budget (datagrams per frame)", ST_UINT,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
-             "Hydro's drain has no upper bound of its own; this supplies one."))
+             "Limits each drain; refills after 16 ms so multiplayer sync can continue."))
 
 /* ---- PAGE_FILES: [paths] and the two log files ------------------------- */
 SETTING("paths", "data_dir",

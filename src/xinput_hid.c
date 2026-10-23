@@ -3,13 +3,17 @@
  *
  * See xinput_hid.h.
  */
-#include <windows.h>
+#include "posix_compat.h"
 #include <stdlib.h>
 #include <string.h>
 
 #include "xinput_hid.h"
 
-static int holds_ig(const char *path)
+/* Portable: a pure string test over the RawInput device-name path, which on
+ * Windows carries an "IG_" (ignore) marker for devices the driver has marked
+ * non-ignorable. Kept outside the _WIN32 guard because the test calls it
+ * directly and because it is the part of this file that has no OS in it. */
+static int __attribute__((unused)) holds_ig(const char *path)
 {
     for (; *path; path++)
         if ((path[0] == 'I' || path[0] == 'i') &&
@@ -18,51 +22,27 @@ static int holds_ig(const char *path)
     return 0;
 }
 
+
+/* No RawInput here. The equivalent census is evdev/hidraw, and what this
+ * table is FOR is worth stating: it tells the launcher which DirectInput
+ * devices are really XInput pads, so a pad that appears twice -- once as an
+ * XInput device and once as a generic HID one -- is listed once.
+ *
+ * Returning nothing found is the conservative answer, not a stub pretending.
+ * An empty list means no device is identified as XInput, so
+ * xinput_hid_is_xinput is false for everything and xinput_hid_hides hides
+ * nothing: a device is only ever hidden once it has been positively
+ * identified, and failing to identify one leaves it visible. The wrong way
+ * round would make a force-feedback pad vanish from the launcher.
+ *
+ * The Linux census belongs with the input port proper, over /dev/input. */
 unsigned xinput_hid_list(xinput_hid_t *out, unsigned max)
 {
-    RAWINPUTDEVICELIST *list = NULL;
-    UINT count = 0, k;
-    unsigned n = 0;
-
-    /* Sized by the API, and asked again if a device arrives between the
-     * two calls: a short buffer fails the whole call. */
-    for (;;) {
-        if (GetRawInputDeviceList(NULL, &count, sizeof *list) == (UINT)-1 ||
-            !count || !(list = malloc(count * sizeof *list)))
-            return 0;
-        if (GetRawInputDeviceList(list, &count, sizeof *list) != (UINT)-1)
-            break;
-        free(list);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            return 0;
-    }
-    for (k = 0; k < count && n < max; k++) {
-        RID_DEVICE_INFO info;
-        char path[512];
-        UINT size;
-
-        if (list[k].dwType != RIM_TYPEHID)
-            continue;
-        memset(&info, 0, sizeof info);
-        info.cbSize = sizeof info;
-        size = sizeof info;
-        if (GetRawInputDeviceInfoA(list[k].hDevice, RIDI_DEVICEINFO, &info,
-                                   &size) == (UINT)-1)
-            continue;
-        size = sizeof path;
-        path[0] = '\0';
-        if (GetRawInputDeviceInfoA(list[k].hDevice, RIDI_DEVICENAME, path,
-                                   &size) == (UINT)-1)
-            continue;
-        path[sizeof path - 1] = '\0';
-        out[n].vid = info.hid.dwVendorId;
-        out[n].pid = info.hid.dwProductId;
-        out[n].ig = holds_ig(path);
-        n++;
-    }
-    free(list);
-    return n;
+    (void)out;
+    (void)max;
+    return 0;
 }
+
 
 int xinput_hid_is_xinput(const xinput_hid_t *list, unsigned count,
                          unsigned long product_data1)

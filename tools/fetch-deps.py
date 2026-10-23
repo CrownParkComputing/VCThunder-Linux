@@ -6,9 +6,7 @@ Everything lands under build/deps/ in this repository, always. Each archive's
 digest is checked before anything is extracted from it, and a package already
 present is left untouched. Nothing third-party is committed: these are fetched.
 
-    SDL3   the 32-bit MinGW SDL3 SDK vcglide links against      (zlib licence)
-    zlib   inflate, for a CHD's `zlib` hunks                     (zlib licence)
-    lzma   LzmaDec.c from 7-Zip's C sources, for `lzma` hunks    (public domain)
+    nuklear   pinned immediate-mode UI header (MIT/public domain)
 """
 
 import argparse
@@ -28,31 +26,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # 7-Zip's tree is mostly LGPL, and the five files taken from it are the ones
 # that say "Public domain" in their own headers.
 PACKAGES = {
-    "SDL3": {
-        "url": "https://github.com/libsdl-org/SDL/releases/download/"
-               "release-3.4.10/SDL3-devel-3.4.10-mingw.tar.gz",
-        "sha256": "39dd2ac370bf33d6332a21ed768d8d49c37cc6f3211d788ead765102722639a8",
-        "members": None,
-        "probe": "SDL3-3.4.10/i686-w64-mingw32/bin/SDL3.dll",
-    },
-    "zlib": {
-        "url": "https://github.com/madler/zlib/releases/download/"
-               "v1.3.2/zlib-1.3.2.tar.gz",
-        "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
-        "members": [f"zlib-1.3.2/{n}" for n in (
-            "LICENSE", "zlib.h", "zconf.h", "zutil.h", "zutil.c",
-            "inflate.h", "inflate.c", "inftrees.h", "inftrees.c",
-            "inffast.h", "inffast.c", "inffixed.h", "adler32.c", "gzguts.h",
-            "crc32.h", "crc32.c")],
-        "probe": "zlib-1.3.2/inflate.c",
-    },
-    "lzma": {
-        "url": "https://github.com/ip7z/7zip/releases/download/"
-               "26.03/7z2603-src.tar.xz",
-        "sha256": "9cbde5099c6deb73691b0579063da5827522ccbbcba3f0020fd04e8c8c16c0d4",
-        "members": ["C/LzmaDec.c", "C/LzmaDec.h", "C/7zTypes.h",
-                    "C/Compiler.h", "C/Precomp.h", "C/7zWindows.h"],
-        "probe": "C/LzmaDec.c",
+    # Nuklear is a single header, not an archive: `raw` means the downloaded file
+    # IS the artifact and there is nothing to extract.
+    "nuklear": {
+        "url": "https://raw.githubusercontent.com/Immediate-Mode-UI/Nuklear/"
+               "9f7750296f176e506c2b24ff55bc24495e2db750/nuklear.h",
+        "sha256": "30a33586aeee98f71db083a6c1546295a4279fd8f214cfab36eec703eb98ebfd",
+        "raw": True,
+        "probe": "nuklear.h",
     },
 }
 
@@ -87,6 +68,11 @@ def fetch(name: str, spec: dict, into: pathlib.Path) -> None:
             temp.replace(archive)
         finally:
             temp.unlink(missing_ok=True)
+    if spec.get("raw"):
+        if not (root / spec["probe"]).is_file():
+            raise SystemExit(f"{name}: download did not produce {spec['probe']}")
+        print(f"{name}: installed at {root}")
+        return
     with tarfile.open(archive, "r:*") as bundle:
         resolved_root = root.resolve()
         wanted = spec["members"]

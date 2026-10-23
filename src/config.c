@@ -82,22 +82,23 @@ static DWORD s_unreadable_error;
  *
  * It says nothing HERE, because the log is not open yet; both outcomes are
  * notes for config_report_notes(). */
+/* ELF has no PE resource section, so the shipped settings file cannot be
+ * carried the way res/vcthunder.rc carries it as RCDATA. It is embedded as a
+ * byte array instead -- the same mechanism renderer/posix/gpu.c uses for its
+ * shader, through tools/embed-text.py, and included rather than linked because
+ * that tool emits a file-scope `static`.
+ *
+ * What matters is that the bytes are the SAME bytes windres would have
+ * carried. config_seed_ini() writes this verbatim to disk, so if the two
+ * platforms differed by a single byte a player's saved settings would depend
+ * on which OS they first ran the port on. */
+#include "../generated/default_ini_data.c"
+
 int config_default_ini(const void **data, unsigned long *size)
 {
-    HMODULE self = NULL;
-    HRSRC found;
-    HGLOBAL loaded;
-
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCSTR)(void *)&config_default_ini, &self))
-        return 0;
-    found = FindResourceA(self, MAKEINTRESOURCEA(IDR_DEFAULT_INI), RT_RCDATA);
-    if (!found)
-        return 0;
-    *size = SizeofResource(self, found);
-    loaded = LoadResource(self, found);
-    return *size && loaded && (*data = LockResource(loaded)) != NULL;
+    *size = (unsigned long)(sizeof vcthunder_ini_data - 1);   /* less the NUL */
+    *data = vcthunder_ini_data;
+    return *size != 0;
 }
 
 int config_seed_ini(const char *path)
@@ -414,6 +415,10 @@ static const setting_desc_t *setting_lookup(const char *section,
 static int load(shim_config_t *c, const char *path, load_mode_t mode,
                 const char *title)
 {
+    char native_path[MAX_PATH];
+    if (!posix_norm(native_path, sizeof native_path, path))
+        return -1;
+    path = native_path;
     char line[512];
     char section[64] = "";
     int applied = 0;

@@ -23,51 +23,19 @@
 
 static void *s_region;
 
-/* If the span is not free, say exactly what is in the way. This is worth real
- * effort: the failure is deterministic per-build and completely opaque
- * otherwise. Reached only if the stub's guarantee broke: e.g. a toolchain
- * change moved .bss so SizeOfImage no longer covers the span, or the exe was
- * linked without -Wl,--image-base,0x100000. */
-static void report_conflicts(void)
-{
-    MEMORY_BASIC_INFORMATION mbi;
-    uintptr_t addr = SPAN_BASE;
-
-    LOGE("walking 0x%08X..0x%08X to find what is in the way:",
-         SPAN_BASE, G->span_end);
-
-    while (addr < G->span_end &&
-           VirtualQuery((LPCVOID)addr, &mbi, sizeof mbi) == sizeof mbi) {
-        if (mbi.State != MEM_FREE) {
-            char name[MAX_PATH] = "";
-            HMODULE mod = NULL;
-
-            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                   (LPCSTR)mbi.BaseAddress, &mod) && mod)
-                GetModuleFileNameA(mod, name, sizeof name);
-
-            LOGE("  0x%08lX..0x%08lX  %s %-7s alloc_base=0x%08lX  %s",
-                 (unsigned long)(uintptr_t)mbi.BaseAddress,
-                 (unsigned long)((uintptr_t)mbi.BaseAddress + mbi.RegionSize),
-                 mbi.State == MEM_COMMIT ? "COMMIT " : "RESERVE",
-                 mbi.Type == MEM_IMAGE   ? "IMAGE"  :
-                 mbi.Type == MEM_MAPPED  ? "MAPPED" :
-                 mbi.Type == MEM_PRIVATE ? "PRIVATE" : "?",
-                 (unsigned long)(uintptr_t)mbi.AllocationBase,
-                 name[0] ? name : "");
-        }
-        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-        if (mbi.RegionSize == 0)
-            break;
-    }
-}
 
 static int read_all(const char *path, unsigned char **buf, size_t *len)
 {
-    FILE *fp = fopen(path, "rb");
+    char norm[MAX_PATH];
+    FILE *fp;
     long sz;
 
+    if (!path) {
+        LOGE("cannot open '%s'", path ? path : "(null)");
+        return 0;
+    }
+    path = posix_norm(norm, sizeof norm, path);
+    fp = fopen(path, "rb");
     if (!fp) {
         LOGE("cannot open '%s'", path);
         return 0;
@@ -134,49 +102,45 @@ int game_map(const char *exe_path)
         return 0;
     }
 
-    /* The span is already ours as part of VCThunder.exe's image (src/stub.c).
-     * It is mapped read-only/execute in places, so make the whole thing RWX:
+    /* Own the span. On Windows it is already ours as part of VCThunder.exe's
+     * image (src/stub.c); on Linux the stub does not exist, so the span is
+     * claimed with one fixed-address mapping. Both paths end with the span RWX:
      * CODE holds the __imp__ table and the record stream as well as
      * instructions, so it is simultaneously code, writable data and a patch
-     * target. This also overwrites the stub's own headers and .text, which is
-     * why nothing in the stub may be needed after this point. */
+     * target. This also overwrites the stub's own headers and .text on Windows,
+     * which is why nothing in the stub may be needed after this point. */
+    /* The game is a flat LinkLoc image with no relocations: the address is not
+     * a request, it is the only address that works. MAP_FIXED_NOREPLACE claims
+     * exactly that span or fails (EEXIST) rather than silently clobbering
+     * whatever the process already mapped there -- the same "refuse rather than
+     * corrupt" the stub enforces on Windows. */
     {
-        DWORD old_prot;
-        if (!VirtualProtect((LPVOID)(uintptr_t)SPAN_BASE, SPAN_SIZE,
-                            PAGE_EXECUTE_READWRITE, &old_prot)) {
-            LOGE("VirtualProtect(0x%08X, %u KB, RWX) failed, GetLastError=%lu",
-                 SPAN_BASE, (unsigned)(SPAN_SIZE / 1024), GetLastError());
-            report_conflicts();
+        void *p = mmap((void *)(uintptr_t)SPAN_BASE, SPAN_SIZE,
+                       PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+        if (p == MAP_FAILED) {
+            LOGE("mmap(0x%08X, %u KB, RWX, MAP_FIXED_NOREPLACE) failed: %s; "
+                 "something is already mapped inside the game's span",
+                 SPAN_BASE, (unsigned)(SPAN_SIZE / 1024), strerror(errno));
             free(file);
             return 0;
         }
-        s_region = (void *)(uintptr_t)SPAN_BASE;
+        if ((uintptr_t)p != SPAN_BASE) {
+            LOGE("mmap returned %p instead of 0x%08X", p, SPAN_BASE);
+            munmap(p, SPAN_SIZE);
+            free(file);
+            return 0;
+        }
+        s_region = p;
     }
-    LOGI("span 0x%08X..0x%08X (%u KB) is RWX and ours",
+    LOGI("span 0x%08X..0x%08X (%u KB) mapped RWX at its fixed base",
          SPAN_BASE, G->span_end, (unsigned)(SPAN_SIZE / 1024));
 
-    /* The PE headers survive only because they fit below the game's first byte.
-     * If a toolchain change grows them past 0x6b0 this must fail loudly rather
-     * than quietly corrupt the game's first instructions. */
-    {
-        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)(uintptr_t)SPAN_BASE;
-        IMAGE_NT_HEADERS *nt =
-            (IMAGE_NT_HEADERS *)((char *)dos + dos->e_lfanew);
-        DWORD hdr = nt->OptionalHeader.SizeOfHeaders;
-
-        if (hdr > G->code_file_off) {
-            LOGE("our PE headers are 0x%lX bytes but the game's CODE starts at "
-                 "0x%X: they would overlap", (unsigned long)hdr,
-                 G->code_file_off);
-            free(file);
-            return 0;
-        }
-        LOGI("PE headers 0x%lX bytes, game CODE at 0x%X: headers preserved",
-             (unsigned long)hdr, G->code_file_off);
-    }
-
-    /* Preserve the host PE headers below the game's first CODE byte. Runtime
-     * libraries may inspect them after mapping. */
+    /* Clear the span from the game's first CODE byte to its end, then copy
+     * CODE in. On Windows this preserves the host PE headers below 0x6b0
+     * (runtime libraries may inspect them after mapping); on Linux the region
+     * below CODE is a fresh anonymous mapping that is already zero. */
     memset((void *)(uintptr_t)G->code_va, 0,
            G->span_end - G->code_va);
     memcpy((void *)(uintptr_t)G->code_va,
@@ -192,8 +156,10 @@ int game_map(const char *exe_path)
 
 void game_unmap(void)
 {
-    /* Nothing to release: the span is part of VCThunder.exe's own image, so
-     * it lives and dies with the process. VirtualFree would fail on MEM_IMAGE. */
+    /* On Linux the span is an anonymous mapping this loader made; it is ours to
+     * release. */
+    if (s_region)
+        munmap(s_region, SPAN_SIZE);
     s_region = NULL;
 }
 

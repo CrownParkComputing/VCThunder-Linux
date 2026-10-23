@@ -1,7 +1,7 @@
 /* glide-replay.c -- replays captured Glide calls through a 32-bit provider.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  */
-#include <windows.h>
+#include "posix_tools.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,31 +133,24 @@ static int load(const char *path, HANDLE *fh, HANDLE *mh)
     LARGE_INTEGER size;
     unsigned i;
 
-    *fh = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (*fh == INVALID_HANDLE_VALUE) {
+    /* POSIX: mmap the capture and leave it mapped for the life of the process.
+     * The Windows path keeps its handles purely so main()'s cleanup still
+     * compiles; there is nothing here for it to close. */
+    size_t mapped = 0;
+
+    *fh = INVALID_HANDLE_VALUE;
+    *mh = NULL;
+    if (!replay_map_file(path, &s_base, &mapped)) {
         fprintf(stderr, "replay: cannot open %s\n", path);
         return 0;
     }
-    if (!GetFileSizeEx(*fh, &size) || size.QuadPart < (LONGLONG)sizeof *h) {
+    if (mapped < sizeof *h) {
         fprintf(stderr, "replay: %s is too short to be a capture\n", path);
+        replay_unmap_file(s_base, mapped);
         return 0;
     }
-    if ((ULONGLONG)size.QuadPart > (ULONGLONG)SIZE_MAX) {
-        fprintf(stderr, "replay: %s is too large for this 32-bit tool\n", path);
-        return 0;
-    }
-    *mh = CreateFileMappingA(*fh, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!*mh) {
-        fprintf(stderr, "replay: cannot map %s\n", path);
-        return 0;
-    }
-    s_base = (const unsigned char *)MapViewOfFile(*mh, FILE_MAP_READ, 0, 0, 0);
-    if (!s_base) {
-        fprintf(stderr, "replay: cannot view %s\n", path);
-        return 0;
-    }
-    s_end = s_base + size.QuadPart;
+    size.QuadPart = (LONGLONG)mapped;
+    s_end = s_base + mapped;
 
     h = (const vglc_header_t *)s_base;
     if (h->magic != VGLC_MAGIC) {
@@ -255,9 +248,7 @@ static int bind_provider(const char *dll)
            whatever the file says; bound it to what a decorated stdcall name
            can hold here. A truncated name simply fails to bind and is counted,
            which is the behaviour we want for a malformed capture. */
-        snprintf(decorated, sizeof decorated, "_%.*s@%u",
-                 (int)(sizeof decorated - sizeof "_@4294967295"),
-                 s_entry[i].name, s_entry[i].argbytes);
+        REPLAY_EXPORT_NAME(decorated, s_entry[i].name, s_entry[i].argbytes);
         s_entry[i].fn = (void *)GetProcAddress(s_provider, decorated);
         if (s_entry[i].fn)
             bound++;
@@ -267,7 +258,11 @@ static int bind_provider(const char *dll)
     /* Not one of the 69 the games call, so it is not in the capture, but a
      * provider that has it gives this tool its picture back for nothing.
      * Without it there is a replay and no frames to compare. */
-    s_read_region = (void *)GetProcAddress(s_provider, "_grLfbReadRegion@28");
+    {
+        char rn[128];
+        REPLAY_EXPORT_NAME(rn, "grLfbReadRegion", 28);
+        s_read_region = (void *)GetProcAddress(s_provider, rn);
+    }
     rep("provider  %s: %u/%u entry points, framebuffer readback %s\n",
            dll, bound, s_entries, s_read_region ? "available" : "MISSING");
     return 1;
@@ -276,6 +271,7 @@ static int bind_provider(const char *dll)
 /* ---- replay ------------------------------------------------------------- */
 
 static unsigned s_surface_w, s_surface_h;
+static const char *s_aux_out;
 static unsigned char *s_lfb_ptr;        /* while a write lock is held */
 static unsigned s_lfb_stride;
 
@@ -344,12 +340,22 @@ static void dump_frame(const char *dir, unsigned frame)
             fprintf(s_hash, "%05u %016llx\n", frame,
                     (unsigned long long)fnv1a(px, (size_t)w * h * 2u));
         if (dir) {
-            snprintf(path, sizeof path, "%s\\frame%05u.png", dir, frame);
+            /* VGL_DIR_SEP, not a backslash: on Linux the backslash version
+             * wrote "outdir\frame00000.png" into the working directory and
+             * left outdir/ empty, because a backslash is a legal character in
+             * a POSIX filename. Nothing failed and nothing said so. */
+            snprintf(path, sizeof path, "%s" VGL_DIR_SEP "frame%05u.png",
+                     dir, frame);
             if (png_write565(path, px, w, h, w))
                 rep("  frame %u -> %s (%ux%u)\n", frame, path, w, h);
         }
     } else {
         rep("  frame %u: grLfbReadRegion REFUSED\n", frame);
+    }
+    if (s_aux_out && rd(GR_BUFFER_AUXBUFFER, 0, 0, w, h, w * 2u, px)) {
+        snprintf(path, sizeof path, "%s" VGL_DIR_SEP "depth%05u.bin", s_aux_out, frame);
+        FILE *depth_file = fopen(path, "wb");
+        if (depth_file) { fwrite(px, 2, (size_t)w * h, depth_file); fclose(depth_file); }
     }
     free(px);
 }
@@ -374,6 +380,8 @@ int main(int argc, char **argv)
             provider = argv[++i];
         else if (strcmp(argv[i], "--out") == 0 && i + 1 < (unsigned)argc)
             out = argv[++i];
+        else if (strcmp(argv[i], "--aux-out") == 0 && i + 1 < (unsigned)argc)
+            s_aux_out = argv[++i];
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < (unsigned)argc)
             max_frames = (unsigned)strtoul(argv[++i], NULL, 0);
         /* Write only from frame N. The replay still has to REPLAY every record
@@ -431,6 +439,7 @@ int main(int argc, char **argv)
             "                                 [--frames N] [--from N] [--report FILE]\n"
             "                                 [--at-frame F --at-draw D] [--out DIR]\n"
             "                                 [--hash FILE] (per-frame hash, all frames)\n"
+            "                                 [--aux-out DIR] (raw native uint16 depth)\n"
             "                                 [--frame-times FILE] (ms and draws per frame)\n"
             "                                 [--depth-locks FILE] (each read-only depth lock, raw)\n"
             "                                 [--present]   (show it; NOT a timing run)\n"
@@ -446,6 +455,7 @@ int main(int argc, char **argv)
         if (!bind_provider(provider))
             return 1;
         if (out) CreateDirectoryA(out, NULL);
+        if (s_aux_out) CreateDirectoryA(s_aux_out, NULL);
         if (hash_path) {
             s_hash = fopen(hash_path, "w");
             if (!s_hash)
@@ -659,7 +669,7 @@ int main(int argc, char **argv)
          * the same entry, and if the two used different conventions every
          * comparison would be off by a frame. */
         if (s_entry[r.idx].payload == PL_SWAP)
-            if ((out || s_hash) && frame >= from_frame)
+            if ((out || s_hash || s_aux_out) && frame >= from_frame)
                 dump_frame(out, frame);
         {
             int ret = call_stdcall(s_entry[r.idx].fn, args, words);

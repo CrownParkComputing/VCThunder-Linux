@@ -2,19 +2,16 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * The game retains its YMF bookkeeping while the host replaces hardware command
- * submission with a 48 kHz WASAPI mixer. A voice loops when its buffer was
+ * submission with a 48 kHz mixer (WASAPI on Windows, SDL3 on Linux). A voice loops when its buffer was
  * allocated as a loop or the play's loopDefault is 0; see av_Play. A render
  * thread mixes voices, and a separate DCS thread executes the game's interrupt
  * callback.
  */
 #include "vcthunder.h"
 
-#define COBJMACROS
-#include <initguid.h>
-#include <mmdeviceapi.h>
-#include <audioclient.h>
-#include <avrt.h>
-#include <ksmedia.h>
+#include <SDL3/SDL.h>
+#include <pthread.h>
+#include "posix_threads.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -145,6 +142,7 @@ static int      s_master  = 255;      /* _audio_Init sets 0xFF                 *
 static float    s_atten_l = 1.0f;     /* cabinet's front-speaker bus trim      */
 static float    s_atten_r = 1.0f;     /* cabinet's seat-woofer bus trim        */
 static float    s_user_gain = 1.0f;   /* [audio] volume, host-side only        */
+static pthread_mutex_t s_output_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Route the cabinet's front-speaker and seat-woofer buses to the selected host
  * output while preserving each title's gain law. */
@@ -169,6 +167,15 @@ static void balance_set(unsigned percent)
     s_bal_seat  = percent >= 50u ? 1.0f : (float)percent / 50.0f;
     s_mix_gain  = 1.0f / sqrtf(s_bal_front * s_bal_front +
                                s_bal_seat * s_bal_seat);
+}
+
+void audio_update_output(unsigned volume, const char *routing, unsigned balance)
+{
+    pthread_mutex_lock(&s_output_lock);
+    s_user_gain = (float)(volume > 400 ? 400 : volume) / 100.f;
+    s_route = routing && !strcasecmp(routing, "cabinet") ? ROUTE_CABINET : ROUTE_MIX;
+    balance_set(balance);
+    pthread_mutex_unlock(&s_output_lock);
 }
 
 void audio_route_buses(float front, float seat, float *left, float *right)
@@ -205,14 +212,10 @@ static const char *route_description(void)
 
 /* ---- WASAPI ------------------------------------------------------------- */
 
-static IMMDeviceEnumerator *s_enum;
-static IMMDevice           *s_dev;
-static IAudioClient        *s_client;
-static IAudioRenderClient  *s_render;
-static WAVEFORMATEX        *s_fmt;
+static SDL_AudioStream *s_audio_stream;
 static HANDLE  s_wake;
 static HANDLE  s_render_thread;
-static UINT32  s_buf_frames;
+static uint32_t s_buf_frames;
 static float  *s_scratch;             /* interleaved stereo mix, 1.0 = full    */
 static int     s_fmt_float;           /* device wants float32, else int16      */
 static int     s_channels;
@@ -322,6 +325,8 @@ static void mix_block(float *out, uint32_t frames)
 {
     int i;
 
+    pthread_mutex_lock(&s_output_lock);
+
     memset(out, 0, (size_t)frames * 2 * sizeof(float));
 
     EnterCriticalSection(&s_voice_cs);
@@ -334,6 +339,7 @@ static void mix_block(float *out, uint32_t frames)
      * transport. Never nest the locks: its deallocator must be able to wait for
      * a mix before the game frees PCM. */
     audio_offroad_mix(out, frames, s_out_rate, s_user_gain);
+    pthread_mutex_unlock(&s_output_lock);
 }
 
 /* Sum of up to 16 simultaneous voices at full scale will clip; the DS-XG's
@@ -478,71 +484,25 @@ static void census(void)
 
 static DWORD WINAPI render_thread(LPVOID unused)
 {
+    float output[512 * 2];
     DWORD next_census = GetTickCount() + 30000;
-    DWORD mmcss_task = 0;
-    HANDLE mmcss;
-    /* IAudioClient::Start leaves the endpoint empty, so the FIRST wake always
-     * finds zero padding, and reporting that as a dropout would print RAN DRY
-     * on every launch, which is what makes s_n_starved useless. Nothing is
-     * sampled until one buffer has been written. */
-    int primed = 0;
-
     (void)unused;
-
-    /* MMCSS gives the audio callback deadline-aware priority without letting a
-     * raw TIME_CRITICAL thread starve the game and D3D12 submission threads. */
-    mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &mmcss_task);
-    if (!mmcss)
-        LOGW("audio: MMCSS Audio registration failed %lu; continuing at "
-             "normal thread priority", GetLastError());
-
     while (!s_stop) {
-        UINT32 pad = 0, avail;
-        BYTE *dst = NULL;
-
-        if ((LONG)(GetTickCount() - next_census) >= 0) {
-            next_census = GetTickCount() + 30000;
-            census();
-        }
-
-        if (WaitForSingleObject(s_wake, 200) == WAIT_TIMEOUT)
-            continue;
-        if (s_stop)
-            break;
-
-        if (FAILED(IAudioClient_GetCurrentPadding(s_client, &pad)))
-            continue;
-        if (primed) {
-            LONG seen = (LONG)pad, was;
-
-            /* Monotone minimum, published without a lock: the census resets it
-             * to -1 and races only itself, so the worst outcome is one
-             * interval's minimum landing in the next one. */
-            for (;;) {
-                was = s_pad_min;
-                if (was >= 0 && was <= seen)
-                    break;
-                if (InterlockedCompareExchange(&s_pad_min, seen, was) == was)
-                    break;
+        if (SDL_GetAudioStreamQueued(s_audio_stream) < (int)sizeof output * 2) {
+            mix_block(s_scratch, 512);
+            emit(s_scratch, output, 512);
+            if (!SDL_PutAudioStreamData(s_audio_stream, output, sizeof output)) {
+                LOGE("audio: SDL stream failed: %s", SDL_GetError());
+                break;
             }
-            if (!pad)
-                InterlockedIncrement(&s_n_drained);
+        } else {
+            Sleep(2);
         }
-        avail = s_buf_frames - pad;
-        if (!avail)
-            continue;
-
-        if (FAILED(IAudioRenderClient_GetBuffer(s_render, avail, &dst))) {
-            s_n_starved++;
-            continue;
+        if ((LONG)(GetTickCount() - next_census) >= 0) {
+            census();
+            next_census = GetTickCount() + 30000;
         }
-        mix_block(s_scratch, avail);
-        emit(s_scratch, dst, avail);
-        IAudioRenderClient_ReleaseBuffer(s_render, avail, 0);
-        primed = 1;
     }
-    if (mmcss)
-        AvRevertMmThreadCharacteristics(mmcss);
     return 0;
 }
 
@@ -853,56 +813,10 @@ static int mask_nest_of(av_mask_role_t role)
  * suspended; this deliberately does not. */
 static void report_mask_holder(DWORD tid, av_mask_role_t held, unsigned waited)
 {
-    HANDLE h;
-    CONTEXT ctx;
-    uint32_t chain[8], eip = 0, ebp = 0;
-    unsigned depth = 0, i;
-    int got = 0, in_game;
-    char line[512];
-    int n;
-
-    h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-                   THREAD_QUERY_INFORMATION, FALSE, tid);
-    if (!h) {
-        LOGE("audio: the mask was held by thread %lu; cannot open it (%lu), so "
-             "it cannot be sampled", (unsigned long)tid,
-             (unsigned long)GetLastError());
-        return;
-    }
-    if (SuspendThread(h) != (DWORD)-1) {
-        memset(&ctx, 0, sizeof ctx);
-        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        if (GetThreadContext(h, &ctx)) {
-            got = 1;
-            eip = ctx.Eip;
-            ebp = ctx.Ebp;
-            depth = diag_return_chain(ebp, chain,
-                                      (unsigned)(sizeof chain /
-                                                 sizeof chain[0]));
-        }
-        ResumeThread(h);
-    }
-    CloseHandle(h);
-
-    in_game = got && eip >= G->image_base && eip < G->span_end;
-    n = snprintf(line, sizeof line,
-                 "audio: the mask was held for %u ms by %s, thread %lu, EIP=",
-                 waited, held == AV_MASK_TICK ? "the tick" : "the game",
-                 (unsigned long)tid);
-    if (n > 0 && (size_t)n < sizeof line)
-        n += diag_describe_addr(line + n, sizeof line - (size_t)n, got ? eip : 0);
-    if (n > 0 && (size_t)n < sizeof line)
-        n += snprintf(line + n, sizeof line - (size_t)n, "; return chain:");
-    for (i = 0; i < depth && n > 0 && (size_t)n < sizeof line; i++) {
-        n += snprintf(line + n, sizeof line - (size_t)n, " ");
-        if (n > 0 && (size_t)n < sizeof line)
-            n += diag_describe_addr(line + n, sizeof line - (size_t)n, chain[i]);
-    }
-    LOGE("%s", line);
-    if (in_game)
-        LOGE("audio: name it with  python3 scripts/p1-symbols.py --lookup "
-             "0x%08lX", (unsigned long)eip);
+    LOGE("audio: mask held by %s thread %lu for %u ms",
+         held == AV_MASK_TICK ? "tick" : "game", (unsigned long)tid, waited);
 }
+
 
 /* Acquire the IRQ mask with a bounded wait. On timeout, transfer ownership and
  * report the previous role to keep the cabinet responsive. */
@@ -1065,20 +979,10 @@ void audio_report_dcs_state(void)
 {
     static unsigned last_ticks;
     static int have_last;
-    CONTEXT ctx;
     DWORD eip = 0;
     int got = 0, in_game, nest;
     av_mask_role_t owner;
 
-    if (s_dcs_thread && SuspendThread(s_dcs_thread) != (DWORD)-1) {
-        memset(&ctx, 0, sizeof ctx);
-        ctx.ContextFlags = CONTEXT_CONTROL;
-        if (GetThreadContext(s_dcs_thread, &ctx)) {
-            eip = ctx.Eip;
-            got = 1;
-        }
-        ResumeThread(s_dcs_thread);
-    }
     in_game = got && (uint32_t)eip >= G->image_base &&
               (uint32_t)eip < G->span_end;
 
@@ -1278,43 +1182,6 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
 /* mingw declares the KSDATAFORMAT_SUBTYPE_* GUIDs but ships them in no import
  * library the shim links, so spell the two we need out. They are the WAVE format
  * tags widened into GUIDs: {tag}-0000-0010-8000-00AA00389B71. */
-static const GUID AV_SUBTYPE_PCM = {
-    0x00000001, 0x0000, 0x0010,
-    { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
-static const GUID AV_SUBTYPE_IEEE_FLOAT = {
-    0x00000003, 0x0000, 0x0010,
-    { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
-
-static int format_understood(const WAVEFORMATEX *f)
-{
-    if (f->nChannels < 1)
-        return 0;
-
-    if (f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT && f->wBitsPerSample == 32) {
-        s_fmt_float = 1;
-        return 1;
-    }
-    if (f->wFormatTag == WAVE_FORMAT_PCM && f->wBitsPerSample == 16) {
-        s_fmt_float = 0;
-        return 1;
-    }
-    if (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-        f->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        const WAVEFORMATEXTENSIBLE *e = (const WAVEFORMATEXTENSIBLE *)f;
-
-        if (IsEqualGUID(&e->SubFormat, &AV_SUBTYPE_IEEE_FLOAT) &&
-            f->wBitsPerSample == 32) {
-            s_fmt_float = 1;
-            return 1;
-        }
-        if (IsEqualGUID(&e->SubFormat, &AV_SUBTYPE_PCM) &&
-            f->wBitsPerSample == 16) {
-            s_fmt_float = 0;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 /* MUST run before game_map(). WASAPI is COM and brings up MMDevAPI, AudioSes
  * and the endpoint's driver stack lazily, all of which need LoadLibrary, which
@@ -1323,13 +1190,6 @@ static int format_understood(const WAVEFORMATEX *f)
 int audio_preload(unsigned dcs_us, unsigned volume_percent, const char *routing,
                   unsigned balance)
 {
-    HRESULT hr;
-    REFERENCE_TIME dur = 20 * 10000;      /* 20 ms; shared mode may round up */
-    WAVEFORMATEX *mix_fmt = NULL;
-    WAVEFORMATEX *fixed_fmt = NULL;
-    DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
     if (routing && _stricmp(routing, "cabinet") == 0)
         s_route = ROUTE_CABINET;
@@ -1353,126 +1213,25 @@ int audio_preload(unsigned dcs_us, unsigned volume_percent, const char *routing,
     s_mask_free = CreateEventA(NULL, FALSE, FALSE, NULL);
     s_cs_ready = 1;
 
-    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-                          &IID_IMMDeviceEnumerator, (void **)&s_enum);
-    if (FAILED(hr)) {
-        LOGE("audio: MMDeviceEnumerator failed 0x%08lX", (unsigned long)hr);
-        return 0;
-    }
-    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(s_enum, eRender, eConsole,
-                                                     &s_dev);
-    if (FAILED(hr)) {
-        LOGE("audio: no default render endpoint (0x%08lX)", (unsigned long)hr);
-        return 0;
-    }
-    hr = IMMDevice_Activate(s_dev, &IID_IAudioClient, CLSCTX_ALL, NULL,
-                            (void **)&s_client);
-    if (FAILED(hr)) {
-        LOGE("audio: IAudioClient activate failed 0x%08lX", (unsigned long)hr);
-        return 0;
-    }
-    hr = IAudioClient_GetMixFormat(s_client, &mix_fmt);
-    if (FAILED(hr) || !mix_fmt) {
-        LOGE("audio: GetMixFormat failed 0x%08lX", (unsigned long)hr);
-        return 0;
-    }
-
-    /* Mix at the cabinet's real 48 kHz, independent of the endpoint's
-     * control-panel rate. Some USB DACs advertise 384 kHz as their shared mix
-     * format; following it multiplied every voice's mixer work by eight.
-     * Shared-mode WASAPI's AUTOCONVERTPCM converts this stream to the endpoint
-     * format. */
-    fixed_fmt = (WAVEFORMATEX *)CoTaskMemAlloc(sizeof *fixed_fmt);
-    if (!fixed_fmt) {
-        CoTaskMemFree(mix_fmt);
-        LOGE("audio: fixed-format allocation failed");
-        return 0;
-    }
-    memset(fixed_fmt, 0, sizeof *fixed_fmt);
-    fixed_fmt->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    fixed_fmt->nChannels = 2;
-    fixed_fmt->nSamplesPerSec = AV_OUT_RATE;
-    fixed_fmt->wBitsPerSample = 32;
-    fixed_fmt->nBlockAlign = fixed_fmt->nChannels *
-                             fixed_fmt->wBitsPerSample / 8;
-    fixed_fmt->nAvgBytesPerSec = fixed_fmt->nSamplesPerSec *
-                                 fixed_fmt->nBlockAlign;
-    s_fmt = fixed_fmt;
-    s_fmt_float = 1;
-    s_channels = 2;
-    s_out_rate = AV_OUT_RATE;
-
-    hr = IAudioClient_Initialize(s_client, AUDCLNT_SHAREMODE_SHARED,
-                                 stream_flags, dur, 0, s_fmt, NULL);
-    if (FAILED(hr)) {
-        /* A small number of older drivers reject automatic conversion. Retry
-         * on a fresh IAudioClient with the endpoint's own format so audio is
-         * never lost merely because the optimization is unavailable. */
-        LOGW("audio: fixed 48000 Hz shared stream rejected 0x%08lX; retrying "
-             "the endpoint mix format", (unsigned long)hr);
-        IAudioClient_Release(s_client);
-        s_client = NULL;
-        CoTaskMemFree(fixed_fmt);
-        s_fmt = mix_fmt;
-        mix_fmt = NULL;
-        hr = IMMDevice_Activate(s_dev, &IID_IAudioClient, CLSCTX_ALL, NULL,
-                                (void **)&s_client);
-        if (FAILED(hr) || !s_client) {
-            LOGE("audio: fallback IAudioClient activate failed 0x%08lX",
-                 (unsigned long)hr);
+    {
+        SDL_AudioSpec spec = { .format = SDL_AUDIO_F32, .channels = 2, .freq = AV_OUT_RATE };
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            LOGW("audio: SDL init: %s", SDL_GetError());
             return 0;
         }
-        if (!format_understood(s_fmt)) {
-            LOGE("audio: unsupported shared mix format (tag=%u bits=%u ch=%u) "
-                 "-- the shim mixes to float32 or 16-bit PCM only",
-                 (unsigned)s_fmt->wFormatTag, (unsigned)s_fmt->wBitsPerSample,
-                 (unsigned)s_fmt->nChannels);
+        s_audio_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                                                  &spec, NULL, NULL);
+        if (!s_audio_stream) {
+            LOGW("audio: SDL device: %s", SDL_GetError());
             return 0;
         }
-        s_channels = s_fmt->nChannels;
-        s_out_rate = s_fmt->nSamplesPerSec;
-        hr = IAudioClient_Initialize(s_client, AUDCLNT_SHAREMODE_SHARED,
-                                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                     dur, 0, s_fmt, NULL);
-        if (FAILED(hr)) {
-            LOGE("audio: fallback IAudioClient::Initialize failed 0x%08lX",
-                 (unsigned long)hr);
+        s_fmt_float = 1;
+        s_channels = 2;
+        s_buf_frames = 512;
+        s_scratch = malloc(512 * 2 * sizeof(float));
+        if (!s_scratch || !SDL_ResumeAudioStreamDevice(s_audio_stream))
             return 0;
-        }
-    } else {
-        LOGI("audio: endpoint mix %u Hz x%u; using fixed 48000 Hz float32 "
-             "stereo client with shared-mode conversion",
-             (unsigned)mix_fmt->nSamplesPerSec,
-             (unsigned)mix_fmt->nChannels);
-        CoTaskMemFree(mix_fmt);
-    }
-
-    s_wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!s_wake || FAILED(IAudioClient_SetEventHandle(s_client, s_wake))) {
-        LOGE("audio: SetEventHandle failed");
-        return 0;
-    }
-    if (FAILED(IAudioClient_GetBufferSize(s_client, &s_buf_frames))) {
-        LOGE("audio: GetBufferSize failed");
-        return 0;
-    }
-    hr = IAudioClient_GetService(s_client, &IID_IAudioRenderClient,
-                                 (void **)&s_render);
-    if (FAILED(hr)) {
-        LOGE("audio: IAudioRenderClient failed 0x%08lX", (unsigned long)hr);
-        return 0;
-    }
-
-    s_scratch = (float *)HeapAlloc(GetProcessHeap(), 0,
-                                   (size_t)s_buf_frames * 2 * sizeof(float));
-    if (!s_scratch) {
-        LOGE("audio: scratch buffer allocation failed");
-        return 0;
-    }
-
-    if (FAILED(IAudioClient_Start(s_client))) {
-        LOGE("audio: IAudioClient::Start failed");
-        return 0;
+        LOGI("audio: native SDL output (%s)", SDL_GetCurrentAudioDriver());
     }
     s_render_thread = CreateThread(NULL, 0, render_thread, NULL, 0, NULL);
     if (!s_render_thread) {
@@ -1637,8 +1396,11 @@ void audio_shutdown(void)
         CloseHandle(s_render_thread);
         s_render_thread = NULL;
     }
-    if (s_client)
-        IAudioClient_Stop(s_client);
+    if (s_audio_stream) {
+        SDL_DestroyAudioStream(s_audio_stream);
+        s_audio_stream = NULL;
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    }
 
     /* Offroad's lock remains live until the shared render thread is joined. */
     if (offroad)
@@ -1648,11 +1410,6 @@ void audio_shutdown(void)
         LOGI("audio: %u plays, %u stops, %u DCS ticks, %u starved buffers",
              s_n_play, s_n_stop, s_n_ticks, s_n_starved);
 
-    if (s_render) { IAudioRenderClient_Release(s_render); s_render = NULL; }
-    if (s_client) { IAudioClient_Release(s_client);       s_client = NULL; }
-    if (s_dev)    { IMMDevice_Release(s_dev);             s_dev = NULL; }
-    if (s_enum)   { IMMDeviceEnumerator_Release(s_enum);  s_enum = NULL; }
-    if (s_fmt)    { CoTaskMemFree(s_fmt);                 s_fmt = NULL; }
     if (s_scratch){ HeapFree(GetProcessHeap(), 0, s_scratch); s_scratch = NULL; }
 
     if (s_cs_ready) {

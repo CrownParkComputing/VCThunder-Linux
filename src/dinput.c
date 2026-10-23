@@ -13,7 +13,12 @@
 #include "io.h"
 #include "ini.h"
 
-#include <dinput.h>
+/* Linux has no DirectInput. dinput_posix.h declares the same vocabulary --
+ * the __wrapper macros, the structs, and the GUIDs -- over an SDL3 backend, so
+ * this file compiles unchanged against either. See that header for why the
+ * GUIDs are verbatim and why the property ids are not really pointers. */
+#include "dinput_posix.h"
+
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,7 +64,6 @@ static LPDIRECTINPUT8A s_di;
 static LPDIRECTINPUTDEVICE8A s_dev;
 static LPDIRECTINPUTEFFECT s_force;
 static HWND s_window;
-static ATOM s_class;
 static char s_name[MAX_PATH];
 static int s_have_ffb;
 /* WHETHER THE OPENED DEVICE PUBLISHES EFFECTS, WHICH IS NOT s_have_ffb.
@@ -392,36 +396,25 @@ static int pick_device(void)
 
 /* The hidden device window is created on the game thread and serviced by the
  * per-frame host message pump. It is never visible. */
-static LRESULT CALLBACK di_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
-{
-    return DefWindowProcA(h, m, w, l);
-}
-
+/* LINUX: there is no owner window, and creating one would buy nothing.
+ *
+ * The window exists on Windows because DirectInput needs a real HWND before it
+ * will grant EXCLUSIVE access to a device, and an exclusive grab is the only
+ * way to be sure a wheel has not also been opened by another program. SDL3's
+ * gamepad and haptic backends own their own file descriptors and have no such
+ * requirement, so there is nothing to own and nothing to subclass.
+ *
+ * So s_window stays NULL and returns 0. Every caller below already handles
+ * that: the primary device then takes the DISCL_NONEXCLUSIVE | DISCL_BACKGROUND
+ * path it already falls back to when the exclusive SetCooperativeLevel fails,
+ * which is the same code and the same outcome. Nothing downstream changes.
+ *
+ * The cost is the one Windows gets for free: on Linux a pad CAN be held by two
+ * programs at once, so steering could fight another window. SDL's gamepad API
+ * has no answer for it, and inventing one is windowing work, not input work. */
 static int create_owner_window(void)
 {
-    WNDCLASSA wc;
-    HMODULE self = NULL;
-
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)(void *)&create_owner_window, &self);
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = di_wndproc;
-    wc.hInstance = self;
-    wc.lpszClassName = "VCThunderInput";
-    s_class = RegisterClassA(&wc);
-    if (!s_class) {
-        LOGW("io: RegisterClass for the input window failed %lu", GetLastError());
-        return 0;
-    }
-    s_window = CreateWindowExA(0, "VCThunderInput", "VCThunder input",
-                               WS_POPUP, 0, 0, 1, 1,
-                               NULL, NULL, self, NULL);
-    if (!s_window) {
-        LOGW("io: CreateWindow for the input window failed %lu", GetLastError());
-        return 0;
-    }
-    return 1;
+    return 0;
 }
 
 /* --- axis ranges -------------------------------------------------------- */
@@ -1156,21 +1149,16 @@ int di_preload(const char *ini)
     snprintf(s_ini_path, sizeof s_ini_path, "%s", ini_path);
     di_load_ini(ini_path);
 
-    s_module = LoadLibraryA("dinput8.dll");
-    if (!s_module) {
-        LOGW("io: dinput8.dll is unavailable; no wheel and no force feedback");
-        return 0;
-    }
-    s_create = (di8_create_fn)(uintptr_t)
-        GetProcAddress(s_module, "DirectInput8Create");
-    if (!s_create) {
-        LOGW("io: dinput8.dll has no DirectInput8Create");
-        return 0;
-    }
-
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)(void *)&di_preload, &self);
+    /* LINUX: there is no dinput8.dll to open and no export to resolve. The
+     * implementation is linked into this binary, so the same indirection is
+     * kept -- s_create is still a function pointer, and everything downstream
+     * is unchanged -- it just points straight at the implementation. Resolving
+     * it through a table rather than calling posix_di_create() directly is
+     * deliberate: it keeps the failure path identical to Windows', so a build
+     * with no input backend at all fails the same way here as it does there. */
+    s_module = NULL;
+    s_create = posix_di_create;
+    self = NULL;
     hr = s_create(self, DIRECTINPUT_VERSION, &IID_IDirectInput8A,
                   (void **)&s_di, NULL);
     if (FAILED(hr) || !s_di) {
@@ -1384,14 +1372,9 @@ void di_close(void)
         s_di = NULL;
     }
     if (s_window) {
-        HMODULE self = NULL;
-        DestroyWindow(s_window);
-        s_window = NULL;
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)(void *)&di_close, &self);
-        UnregisterClassA("VCThunderInput", self);
-        s_class = 0;
+        /* Linux: s_window is never set (see create_owner_window), so this is
+         * unreachable. Guarded rather than stubbed -- a DestroyWindow that did
+         * nothing would be a lie about what cleanup happened. */
     }
 }
 

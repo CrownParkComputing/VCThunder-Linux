@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "../src/posix_compat.h"
 
 #include "zlib.h"
 #include "../src/bezel.h"

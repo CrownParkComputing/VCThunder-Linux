@@ -8,9 +8,14 @@
  * SO_BROADCAST, a wildcard bind, a receive budget, and the single-machine
  * address substitution.
  */
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <iphlpapi.h>
+/* Linux has no Winsock. netsock_posix.h declares the same vocabulary -- the
+ * SOCKET handle, the error codes, the ioctl id, the IP_ADAPTER_INFO list -- and
+ * netsock_posix.c implements it over BSD sockets and getifaddrs(). This is the
+ * same seam src/dinput.c opens onto dinput_posix.h: an unchanged upstream file
+ * that speaks a Windows API, given that API's vocabulary on Linux rather than a
+ * rewrite. It is included here and not in vcthunder.h so the winsock types stay
+ * local to this file, exactly as that header's note requires. */
+#include "netsock_posix.h"
 
 #include "vcthunder.h"
 
@@ -81,6 +86,7 @@ static struct {
 } s_n;
 
 static unsigned s_rx_this_frame;
+static DWORD s_rx_window_started;
 static unsigned s_rx_budget = 64;
 
 /* ---- small helpers ------------------------------------------------------ */
@@ -166,23 +172,19 @@ int net_link_enabled(void)
  * runs before game_map(), which is the last moment LoadLibrary works at all. */
 static int resolve_host_address(void)
 {
-    HMODULE iph = LoadLibraryA("iphlpapi.dll");
     get_adapters_info_fn get_info;
     IP_ADAPTER_INFO *buf = NULL, *a, *chosen = NULL;
     ULONG len = 0;
     ULONG rc;
 
-    if (!iph) {
-        LOGE("link: iphlpapi.dll did not load (%lu); this machine's own "
-             "address cannot be read", GetLastError());
-        return 0;
-    }
-    get_info = (get_adapters_info_fn)(void *)
-        GetProcAddress(iph, "GetAdaptersInfo");
-    if (!get_info) {
-        LOGE("link: iphlpapi.dll has no GetAdaptersInfo");
-        return 0;
-    }
+    /* Linux has no iphlpapi.dll and no export to resolve. The adapter walk is
+     * linked into this binary (netsock_posix.c, over getifaddrs and
+     * /proc/net/route), so the indirection is kept rather than called directly:
+     * get_info still points at a function of exactly this type, and every line
+     * below -- the two-call sizing protocol, the gateway-preferring selection,
+     * the loopback skip -- runs unchanged and reads this machine's address the
+     * same way it does on Windows. */
+    get_info = posix_get_adapters_info;
 
     rc = get_info(NULL, &len);
     if (rc != ERROR_BUFFER_OVERFLOW && rc != ERROR_SUCCESS) {
@@ -502,13 +504,22 @@ static int __stdcall ov_recvfrom(SOCKET s, char *buf, int len, int flags,
      * than the link. Since this host owns the entry point, the bound costs no
      * game code: WSAEWOULDBLOCK is the answer the loop already handles. */
     if (s_mode != LINK_OFF && s_rx_this_frame >= s_rx_budget) {
-        s_n.budget_refusals++;
-        s_wsa_set_last_error(WSAEWOULDBLOCK);
-        return SOCKET_ERROR;
+        /* Offroad also receives while waiting inside a multiplayer sync
+         * barrier. Refill after 16 ms there: waiting for the next rendered
+         * frame would prevent that barrier from ever receiving its release. */
+        DWORD now = GetTickCount();
+        if ((DWORD)(now - s_rx_window_started) >= 16) {
+            s_rx_this_frame = 0;
+            s_rx_window_started = now;
+        } else {
+            s_n.budget_refusals++;
+            s_wsa_set_last_error(WSAEWOULDBLOCK);
+            return SOCKET_ERROR;
+        }
     }
     rc = s_recvfrom(s, buf, len, flags, from, fromlen);
     if (rc >= 0 && s_mode != LINK_OFF) {
-        s_rx_this_frame++;
+        if (!s_rx_this_frame++) s_rx_window_started = GetTickCount();
         s_n.received++;
         LOGT("link: %d bytes received on socket %llu", rc,
              (unsigned long long)s);
@@ -548,7 +559,7 @@ void net_link_report(unsigned frames)
                                 s_n.send_errors || s_n.budget_refusals))
         return;
     LOGI("link: over %u frames: %u sent, %u fanned out, %u received, "
-         "%u send errors, %u receives refused by the %u/frame budget",
+         "%u send errors, %u receives deferred by the %u/frame (16 ms refill) budget",
          frames, s_n.sent, s_n.fanned, s_n.received, s_n.send_errors,
          s_n.budget_refusals, s_rx_budget);
     s_n.sent = s_n.fanned = s_n.received = 0;
@@ -557,8 +568,6 @@ void net_link_report(unsigned frames)
 
 int net_link_preload(void)
 {
-    HMODULE ws2 = LoadLibraryA("ws2_32.dll");
-
     if (_stricmp(g_cfg.link, "lan") == 0)
         s_mode = LINK_LAN;
     else if (_stricmp(g_cfg.link, "local") == 0)
@@ -568,35 +577,25 @@ int net_link_preload(void)
     if (g_cfg.link_rx_budget)
         s_rx_budget = g_cfg.link_rx_budget;
 
-    /* Resolved whatever the mode is: the overrides are bound by win32_bind()
-     * either way and a null passthrough would be a fault, not a no-op. */
-    if (!ws2) {
-        LOGE("link: ws2_32.dll did not load (%lu)", GetLastError());
-        s_mode = LINK_OFF;
-        return 0;
-    }
-    s_socket = (SOCKET (WINAPI *)(int, int, int))(void *)
-        GetProcAddress(ws2, "socket");
-    s_bind = (int (WINAPI *)(SOCKET, const struct sockaddr *, int))(void *)
-        GetProcAddress(ws2, "bind");
-    s_sendto = (int (WINAPI *)(SOCKET, const char *, int, int,
-                               const struct sockaddr *, int))(void *)
-        GetProcAddress(ws2, "sendto");
-    s_recvfrom = (int (WINAPI *)(SOCKET, char *, int, int,
-                                 struct sockaddr *, int *))(void *)
-        GetProcAddress(ws2, "recvfrom");
-    s_setsockopt = (int (WINAPI *)(SOCKET, int, int, const char *, int))(void *)
-        GetProcAddress(ws2, "setsockopt");
-    s_wsa_set_last_error = (void (WINAPI *)(int))(void *)
-        GetProcAddress(ws2, "WSASetLastError");
-    /* Optional: without it a missing unit is reported as a dead link rather
-     * than as an absent one, which is worse but not fatal. */
-    s_wsa_ioctl = (int (WINAPI *)(SOCKET, DWORD, void *, DWORD, void *, DWORD,
-                                  DWORD *, void *, void *))(void *)
-        GetProcAddress(ws2, "WSAIoctl");
-    if (!s_wsa_ioctl)
-        LOGW("link: ws2_32.dll has no WSAIoctl; SIO_UDP_CONNRESET cannot be "
-             "cleared");
+    /* Linux has no ws2_32.dll to open and no exports to resolve. The five calls
+     * net_link routes through are BSD sockets, and posix_wsa_* are cdecl
+     * wrappers with the exact signatures these pointers expect -- each also
+     * mirrors a failed call's errno into the Winsock last-error, so a would-
+     * block recv reports WSAEWOULDBLOCK the way ws2_32 does. They are assigned
+     * straight to the same pointers the Windows path resolves rather than being
+     * called directly; that keeps the null check below and the whole failure
+     * path identical across platforms, and it is the same choice dinput.c makes
+     * with `s_create = posix_di_create`. */
+    s_socket             = posix_wsa_socket;
+    s_bind               = posix_wsa_bind;
+    s_sendto             = posix_wsa_sendto;
+    s_recvfrom           = posix_wsa_recvfrom;
+    s_setsockopt         = posix_wsa_setsockopt;
+    s_wsa_set_last_error = posix_wsa_set_last_error;
+    /* Answered rather than absent: SIO_UDP_CONNRESET is a no-op that succeeds
+     * on Linux (an unconnected datagram socket never surfaces an ICMP error),
+     * so there is no "cannot be cleared" warning to give here. */
+    s_wsa_ioctl          = posix_wsa_ioctl;
     if (!s_socket || !s_bind || !s_sendto || !s_recvfrom || !s_setsockopt ||
         !s_wsa_set_last_error) {
         LOGE("link: ws2_32.dll is missing one of socket/bind/sendto/recvfrom/"

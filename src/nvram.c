@@ -150,6 +150,9 @@ int nvram_install(const char *save_dir)
         LOGE("nvram: save path under '%s' is too long", save_dir);
         return 0;
     }
+    for (char *p = s_path; *p; p++)
+        if (*p == '\\')
+            *p = '/';
 
     patch_jmp(G->wrs_module_init, (void *)nv_module_init);
     patch_jmp(G->wrs_init,        (void *)nv_init);

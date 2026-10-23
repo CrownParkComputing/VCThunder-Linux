@@ -9,10 +9,14 @@
 #include "vcthunder.h"
 #include "io.h"
 
-#include <mmsystem.h>
+/* Linux: XInput and the WinMM joystick API are declared by xinput_posix.h and
+ * implemented over SDL3 in xinput_posix.c. */
+#include "xinput_posix.h"
+#include "window_posix.h"
+#include "../menu/native_menu.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <xinput.h>
 
 #include "xi_axes.h"
 
@@ -30,7 +34,6 @@ static xinput_set_state_fn s_xinput_set_state;
 static int s_xinput_live;
 static joy_get_pos_ex_fn s_joy_get_pos_ex;
 static joy_get_caps_fn s_joy_get_caps;
-static HMODULE s_winmm_module;
 static JOYCAPSA s_joy_caps;
 static unsigned s_joy_caps_device;
 static int s_joy_caps_valid;
@@ -49,45 +52,14 @@ static int s_xinput_reported, s_winmm_reported;
 
 static void preload_xinput(void)
 {
-    static const char *const names[] = {
-        "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"
-    };
-    unsigned i;
-
-    if (s_cfg.provider == PROVIDER_NONE || s_cfg.provider == PROVIDER_WINMM)
-        return;
-    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
-        HMODULE mod = LoadLibraryA(names[i]);
-        if (!mod)
-            continue;
-        s_xinput_get_state = (xinput_get_state_fn)(uintptr_t)
-            GetProcAddress(mod, "XInputGetState");
-        s_xinput_set_state = (xinput_set_state_fn)(uintptr_t)
-            GetProcAddress(mod, "XInputSetState");
-        if (s_xinput_get_state) {
-            LOGI("io: analogue backend preloaded: %s", names[i]);
-            return;
-        }
-    }
-    if (s_cfg.provider == PROVIDER_XINPUT)
-        LOGW("io: XInput requested but no XInput DLL is available; keyboard remains active");
+    s_xinput_get_state = XInputGetState;
+    s_xinput_set_state = XInputSetState;
 }
 
 static void preload_winmm(void)
 {
-    if (s_cfg.provider == PROVIDER_NONE || s_cfg.provider == PROVIDER_XINPUT)
-        return;
-    s_winmm_module = GetModuleHandleA("winmm.dll");
-    if (!s_winmm_module)
-        s_winmm_module = LoadLibraryA("winmm.dll");
-    if (s_winmm_module) {
-        s_joy_get_pos_ex = (joy_get_pos_ex_fn)(uintptr_t)
-            GetProcAddress(s_winmm_module, "joyGetPosEx");
-        s_joy_get_caps = (joy_get_caps_fn)(uintptr_t)
-            GetProcAddress(s_winmm_module, "joyGetDevCapsA");
-    }
-    if ((!s_joy_get_pos_ex || !s_joy_get_caps) && s_cfg.provider == PROVIDER_WINMM)
-        LOGW("io: WinMM requested but joystick APIs are unavailable; keyboard remains active");
+    s_joy_get_pos_ex = joyGetPosEx;
+    s_joy_get_caps = joyGetDevCapsA;
 }
 
 /* --- what each backend resolved, said out loud -------------------------- */
@@ -185,10 +157,11 @@ static void report_axis_map(input_provider_t provider, const char *prefix,
 
 static int input_enabled(void)
 {
+    if (native_menu_blocks_input()) return 0;
     DWORD pid = 0;
     HWND fg = GetForegroundWindow();
 
-    if (g_cfg.input_background)
+    if (g_cfg.input_background || getenv("VCT_DUAL_CABINET"))
         return 1;
     if (!fg)
         return 0;
@@ -198,7 +171,9 @@ static int input_enabled(void)
 
 static int key_down(int vk)
 {
-    return vk && s_input_active && (GetAsyncKeyState(vk) & 0x8000) != 0;
+    return vk && s_input_active &&
+        (!getenv("VCT_DUAL_CABINET") || GetForegroundWindow() == window_game()) &&
+        (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
 /* The map's deadzone, as a fraction. The arithmetic itself is io.h's, shared

@@ -89,7 +89,8 @@ static SOCKET open_unit(unsigned octet)
     /* Both titles do this themselves, through ioctlsocket, before they drain:
      * without it the reads below would block forever rather than report the
      * WSAEWOULDBLOCK the budget has to imitate. */
-    ioctlsocket(s, FIONBIO, &nonblocking);
+    check(ioctlsocket(s, (long)0x8004667eu, &nonblocking) == 0,
+          "original ETS/Winsock request enables nonblocking on Linux");
 
     memset(&in, 0, sizeof in);
     in.sin_family = AF_INET;
@@ -188,9 +189,16 @@ int main(int argc, char **argv)
     check(drain(b, buf, (int)sizeof buf) < 0 &&
           WSAGetLastError() == WSAEWOULDBLOCK,
           "and answers WSAEWOULDBLOCK once it is spent");
+    Sleep(20);
+    check(drain(b, buf, (int)sizeof buf) == 1,
+          "a sync barrier can receive again without waiting for a rendered frame");
+    s_rx_this_frame = s_rx_budget;
+    s_rx_window_started = GetTickCount();
+    check(ov_sendto(a, "x", 1, 0, (const struct sockaddr *)&to, (int)sizeof to) == 1,
+          "a packet is queued for the next frame");
     net_link_frame();
     check(drain(b, buf, (int)sizeof buf) == 1,
-          "the next frame resumes the drain rather than dropping it");
+          "the next frame also resumes the drain rather than dropping it");
 
     closesocket(a);
     closesocket(b);

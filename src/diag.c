@@ -23,12 +23,16 @@
  * question and returns FALSE instead of faulting. */
 int diag_peek32(uint32_t addr, uint32_t *out)
 {
-    SIZE_T got = 0;
-
+    int fd;
+    ssize_t got;
     if (addr < 0x10000u || (addr & 3u))
         return 0;
-    return ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)addr,
-                             out, sizeof *out, &got) && got == sizeof *out;
+    fd = open("/proc/self/mem", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    got = pread(fd, out, sizeof *out, (off_t)addr);
+    close(fd);
+    return got == sizeof *out;
 }
 
 /* Write "0xADDR(module+off)" for an address, so a report is readable on its own.

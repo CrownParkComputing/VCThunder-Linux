@@ -1088,9 +1088,12 @@ const game_profile_t g_profile_hydro = {
     .dsound_is_playing = 0x00000000,          /* ABSENT in hydro: _dsound_IsCookiePLaying */
     .network_enable = 0x00000000,             /* ABSENT in hydro: _network_Enable */
     .network_enabled = 0x00000000,            /* ABSENT in hydro: _Network_bEnabled */
+    .operator_init = 0x00153258,              /* _operator_ModuleInit: operator settings before GameInit */
+    .operator_settings = 0x0062BB6C,          /* _OperatorSettings: cabinet operator settings */
     .ets_tcp_get_device_handle = 0x001A760C,  /* _EtsTCPGetDeviceHandle: name -> device handle; 0 is what makes both link stacks give up */
     .ets_tcp_get_device_cfg = 0x001A7620,     /* _EtsTCPGetDeviceCfg: handle -> 0x3a byte config block; +0x18 is the IPv4 address */
     .ets_tcp_configure_device = 0x001A79B8,   /* _EtsTCPConfigureDevice: writes the block back; 0 = success, which is what Offroad tests */
+    .hook_operator_init = 0x00000005,         /* operator init prologue: len | reloc<<8 */
     .hook_init3dfx = 0x00000005,              /* _init3dfx_Init prologue: len | reloc<<8 */
     .hook_queryhwcaps = 0x00000006,           /* _hardware_caps_driver_QueryHardwareCaps prologue: len | reloc<<8 */
     .hook_viewport_init = 0x00000007,         /* _viewport_InitToFullScreen prologue: len | reloc<<8 */

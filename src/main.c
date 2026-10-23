@@ -1,19 +1,46 @@
 /* main.c -- main host entry point.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * The executable reserves the game image, while this DLL retains all persistent
- * host logic. shim_run() must not return because its caller is overwritten.
+ * The native host reserves the original game's address range with mmap.
  * Libraries are preloaded before mapping; patches are installed before DATA is
  * unpacked and the game CRT is entered.
  */
+#define _GNU_SOURCE 1       /* REG_EIP & co. in <sys/ucontext.h> */
 #include "vcthunder.h"
-#include "ingest.h"
+#include "dual_screen.h"
 
-#include <shellapi.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <signal.h>
+#include <ucontext.h>
+#include <sys/ucontext.h>
+#include <asm/ldt.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+/* The Linux stand-in for Windows' EXCEPTION_POINTERS: the signal handler fills
+ * a fake exception record (code + information) and points ContextRecord at the
+ * ucontext, so heal_privileged() and on_exception() read EIP the same way. */
+typedef struct {
+    DWORD        ExceptionCode;
+    DWORD        ExceptionInformation[2];
+    ucontext_t  *ContextRecord;
+} EXCEPTION_RECORD;
+typedef struct {
+    EXCEPTION_RECORD *ExceptionRecord;
+    ucontext_t       *ContextRecord;
+} EXCEPTION_POINTERS;
+
+#define CTX_EIP(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_EIP])
+#define CTX_ESP(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_ESP])
+#define CTX_EBP(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_EBP])
+#define CTX_EAX(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_EAX])
+#define CTX_ECX(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_ECX])
+#define CTX_EDX(ep)      ((DWORD)(ep)->ContextRecord->uc_mcontext.gregs[REG_EDX])
+#define CTX_SET_EIP(ep,v) ((ep)->ContextRecord->uc_mcontext.gregs[REG_EIP] = (v))
 
 static const char *exception_name(DWORD code)
 {
@@ -93,7 +120,7 @@ static void irq_count(DWORD eip, unsigned char op)
 
 static int heal_privileged(EXCEPTION_POINTERS *ep)
 {
-    DWORD eip = ep->ContextRecord->Eip;
+    DWORD eip = CTX_EIP(ep);
     unsigned char *p = (unsigned char *)(uintptr_t)eip;
     unsigned char op = *p;
     LONG n;
@@ -140,7 +167,7 @@ static int heal_privileged(EXCEPTION_POINTERS *ep)
 
     /* Step over the instruction we just performed. cli and sti are one byte, so
      * this is the address the game would have resumed at either way. */
-    ep->ContextRecord->Eip = eip + 1;
+    CTX_SET_EIP(ep, eip + 1);
     return 1;
 }
 
@@ -263,16 +290,8 @@ static const char *base_name(const char *path)
  * headers are simply there to read. */
 static uintptr_t pe_image_base(HMODULE h)
 {
-    const unsigned char *p = (const unsigned char *)h;
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)p;
-    const IMAGE_NT_HEADERS32 *nt;
-
-    if (!h || dos->e_magic != IMAGE_DOS_SIGNATURE)
-        return 0;
-    nt = (const IMAGE_NT_HEADERS32 *)(p + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE)
-        return 0;
-    return (uintptr_t)nt->OptionalHeader.ImageBase;
+    (void)h;
+    return 0;
 }
 
 /* A fault inside the game is the expected outcome for a while, so make it
@@ -280,7 +299,7 @@ static uintptr_t pe_image_base(HMODULE h)
 static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    DWORD eip  = ep->ContextRecord->Eip;
+    DWORD eip  = CTX_EIP(ep);
     int in_game = (eip >= G->image_base && eip < G->span_end);
 
     /* Benign notifications, not faults. 0x406D1388 is MS_VC_EXCEPTION (the
@@ -321,7 +340,7 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
             GetModuleFileNameA(h, mod, sizeof mod);
         /* Named the same way every other instrument names an address, so a
          * fault and a watchdog report can be read against each other. */
-        diag_describe_addr(where, sizeof where, eip);
+        snprintf(where, sizeof where, "0x%08lX", (unsigned long)eip);
         LOGE("EXCEPTION 0x%08lX %s at %s",
              (unsigned long)code, exception_name(code), where);
         /* The module-relative offset, because the absolute EIP of a
@@ -348,49 +367,118 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
         LOGE("  identify it with:  python3 scripts/p1-symbols.py --lookup 0x%lX",
              (unsigned long)eip);
 
-    LOGE("  esp=0x%08lX ebp=0x%08lX eax=0x%08lX ecx=0x%08lX edx=0x%08lX",
-         (unsigned long)ep->ContextRecord->Esp, (unsigned long)ep->ContextRecord->Ebp,
-         (unsigned long)ep->ContextRecord->Eax, (unsigned long)ep->ContextRecord->Ecx,
-         (unsigned long)ep->ContextRecord->Edx);
+    {
+        DWORD sp = (DWORD)CTX_ESP(ep);
+        DWORD ret = 0;
+        if (sp > 0x1000 && sp < 0xFFFFF000)
+            ret = *(volatile DWORD *)(uintptr_t)sp;
+        LOGE("  esp=0x%08lX ebp=0x%08lX eax=0x%08lX ecx=0x%08lX edx=0x%08lX "
+             "ret@esp=0x%08lX",
+             (unsigned long)sp, (unsigned long)CTX_EBP(ep),
+             (unsigned long)CTX_EAX(ep), (unsigned long)CTX_ECX(ep),
+             (unsigned long)CTX_EDX(ep), (unsigned long)ret);
+    }
 
     log_close();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* The stub is freestanding and has no argv, so recover one here. Use Windows'
- * own quote/backslash rules: argv[0] is quoted whenever the pack lives under a
- * path with spaces, and --exe / --data explicitly accept arbitrary paths. */
+/* The Linux stand-in for AddVectoredExceptionHandler: a signal handler that
+ * emulates cli/sti (the common privileged fault) and otherwise reports the
+ * fault the way on_exception() would, then terminates. The int 0xFE/0xFF ETS
+ * gates arrive as SIGSEGV too and are reported here until they are emulated. */
+static void on_signal(int sig, siginfo_t *si, void *ctx)
+{
+    ucontext_t *uc = (ucontext_t *)ctx;
+    EXCEPTION_RECORD rec;
+    EXCEPTION_POINTERS ep;
+    DWORD eip = (DWORD)uc->uc_mcontext.gregs[REG_EIP];
+    int in_game = (eip >= G->image_base && eip < G->span_end);
+
+    memset(&rec, 0, sizeof rec);
+    rec.ExceptionInformation[1] = (DWORD)(uintptr_t)si->si_addr;
+    ep.ExceptionRecord = &rec;
+    ep.ContextRecord = uc;
+
+    /* cli/sti are privileged and fault with SIGSEGV; emulate them. */
+    if (sig == SIGSEGV && in_game && heal_privileged(&ep))
+        return;
+
+    rec.ExceptionCode = (sig == SIGSEGV) ? EXCEPTION_ACCESS_VIOLATION :
+                        (sig == SIGILL)  ? EXCEPTION_ILLEGAL_INSTRUCTION :
+                                           EXCEPTION_INT_DIVIDE_BY_ZERO;
+    on_exception(&ep);
+    _exit(1);
+}
+
+static void install_exception_handler(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_signal;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+}
+
+/* The game's CRT and its frame-based SEH runtime (__except_handler3) read and
+ * write fs:[0], the Windows TEB's exception-list head. Windows points %fs at
+ * the thread's TEB; Linux leaves %fs at base 0 on the main thread, so the
+ * first such access is a NULL read. Give the game a small TEB, point %fs at it
+ * and seed the SEH chain with the end-of-chain sentinel (0xFFFFFFFF, which is
+ * what a fresh Windows thread's fs:[0] holds). */
+static __thread unsigned char s_teb[4096] __attribute__((aligned(4096)));
+
+void install_teb(void)
+{
+    struct user_desc desc;
+    uint32_t sel;
+
+    memset(&desc, 0, sizeof desc);
+    desc.entry_number = -1;              /* kernel allocates a GDT entry */
+    desc.base_addr = (unsigned long)(uintptr_t)s_teb;
+    desc.limit = 0xFFFFF;
+    desc.seg_32bit = 1;
+    desc.contents = 0;                   /* data */
+    desc.read_exec_only = 0;
+    desc.limit_in_pages = 1;             /* 4 GB span */
+    desc.seg_not_present = 0;
+    desc.useable = 1;
+    if (syscall(SYS_set_thread_area, &desc) != 0) {
+        LOGW("teb: set_thread_area failed; the game's SEH chain will fault");
+        return;
+    }
+    sel = ((uint32_t)desc.entry_number << 3) | 3;   /* GDT selector, RPL 3 */
+    *(uint32_t *)s_teb = 0xFFFFFFFF;                 /* end of SEH chain */
+    __asm__ volatile("mov %0, %%fs" : : "r"(sel));
+    LOGI("teb: %%fs -> 0x%08lX (entry %u, SEH head 0xFFFFFFFF)",
+         (unsigned long)(uintptr_t)s_teb, (unsigned)desc.entry_number);
+}
+
+/* Copy the real native argv into the host-owned argument buffer. */
 static int split_cmdline(char *buf, size_t bufsz, char **argv, int maxargs)
 {
-    LPWSTR *wide;
+    /* The native entry point passes the real argv. */
+    extern int    g_linux_argc;
+    extern char **g_linux_argv;
     size_t used = 0;
-    int argc, i;
+    int i;
 
-    wide = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!wide)
+    if (g_linux_argc > maxargs)
         return -1;
-    if (argc > maxargs) {
-        LocalFree(wide);
-        return -1;
-    }
-    for (i = 0; i < argc; i++) {
-        int need = WideCharToMultiByte(CP_ACP, 0, wide[i], -1, NULL, 0,
-                                       NULL, NULL);
+    for (i = 0; i < g_linux_argc; i++) {
+        size_t need = strlen(g_linux_argv[i]) + 1;
 
-        if (need <= 0 || (size_t)need > bufsz - used) {
-            LocalFree(wide);
+        if (need > bufsz - used)
             return -1;
-        }
         argv[i] = buf + used;
-        if (!WideCharToMultiByte(CP_ACP, 0, wide[i], -1, argv[i], need,
-                                 NULL, NULL)) {
-            LocalFree(wide);
-            return -1;
-        }
-        used += (size_t)need;
+        memcpy(argv[i], g_linux_argv[i], need);
+        used += need;
     }
-    LocalFree(wide);
-    return argc;
+    return g_linux_argc;
 }
 
 /* Perform orderly host shutdown without unwinding the game's permanent frame
@@ -526,7 +614,7 @@ __declspec(dllexport) int shim_run(void)
     int argc = split_cmdline(cmdbuf, sizeof cmdbuf, argv, 64);
 
     if (argc < 0) {
-        fprintf(stderr, "VCThunder: cannot parse the Windows command line\n");
+        fprintf(stderr, "VCThunder: too many or oversized command-line arguments\n");
         ExitProcess(2);
     }
 
@@ -536,33 +624,11 @@ __declspec(dllexport) int shim_run(void)
      * one written here. It never overwrites, so this is a no-op on every run
      * but the first. config_seed_ini(). */
     config_seed_ini("vcthunder.ini");
-    /* CHDs dropped on the exe: the launcher opens and imports them, so the
-     * person who did it sees a window rather than a console. */
-    if (argc > 1 && ingest_dropped(argc, argv)) {
-        int wargc, i;
-        LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-        for (i = 1; wargv && i < wargc; i++)
-            launcher_queue_import(wargv[i]);
-        if (wargv)
-            LocalFree(wargv);
-        argc = 1;
-    }
-    if (argc == 1) {
-        launcher_result_t selected = launcher_run("vcthunder.ini");
-
-        if (selected == LAUNCHER_CANCEL)
-            ExitProcess(0);
-        config_defaults(&g_cfg);
-        config_load_shared(&g_cfg, "vcthunder.ini");
-        snprintf(g_cfg.title, sizeof g_cfg.title, "%s",
-                 selected == LAUNCHER_HYDRO ? "hydro" : "offroad");
-    } else {
+    {
         config_defaults(&g_cfg);
         config_load_shared(&g_cfg, "vcthunder.ini");
         /* `import FILE.chd`: the front door from a command line, which runs
          * no game and so opens no log to truncate. */
-        if (ingest_is_command(argc, argv))
-            ExitProcess((UINT)ingest_cli(g_cfg.data_dir));
         if (!config_parse_argv(&g_cfg, argc, argv))
             ExitProcess(2);
     }
@@ -572,7 +638,8 @@ __declspec(dllexport) int shim_run(void)
      * consumer reads the keys they settle. */
     config_report_notes();
     config_resolve_graphics(&g_cfg);
-    AddVectoredExceptionHandler(1, on_exception);
+    install_exception_handler();
+    install_teb();
 
     /* The title is chosen ONCE, before anything reads G. Nothing below this
      * point works without it (fs_map, the preloads and every patch address are
@@ -606,8 +673,6 @@ __declspec(dllexport) int shim_run(void)
 
     /* Last of the preloads, and only when asked: the module whose TLS
      * callbacks and delay-loaded import the probe fires after the mapping. */
-    if (g_cfg.probe_image || g_cfg.probe_refusal)
-        image_probe_preload();
 
     if (!game_map(g_cfg.exe))
         goto fail;
@@ -642,6 +707,8 @@ __declspec(dllexport) int shim_run(void)
     if (!nvram_install(g_cfg.save_dir))
         goto fail;
 
+    if (!dual_screen_install())
+        goto fail;
     if (!game_unpack())
         goto fail;
 
@@ -676,10 +743,9 @@ __declspec(dllexport) int shim_run(void)
     }
 
     /* Diagnostic only, and off unless the INI asks for it. */
-    profile_install(g_cfg.profile_ms);
-    drawreplay_install(g_cfg.draw_replay, g_cfg.draw_replay_start,
-                       g_cfg.draw_replay_control,
-                       strcmp(g_cfg.frame_rate, "60") == 0, 1);
+    if (!strcmp(g_cfg.frame_rate, "60"))
+        LOGW("60 FPS interpolation is not available in the Linux build; "
+             "use the in-game Performance menu to view FPS and adjust game-clock speed");
 
     /* Last, because it has to see every patch this host installs, and before
      * the dry-run exit, because the comparison it makes needs no game thread:
@@ -689,10 +755,6 @@ __declspec(dllexport) int shim_run(void)
     /* After every patch, because the question is what survives the state the
      * game actually runs in, and before the dry-run exit, because a probed
      * process must never be handed to the game. */
-    if (g_cfg.probe_image)
-        image_probe_run();
-    if (g_cfg.probe_refusal)
-        image_probe_refusal();
 
     if (g_cfg.dry_run) {
         LOGI("--dry-run: image mapped, unpacked and patched; not running");

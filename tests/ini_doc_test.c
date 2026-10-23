@@ -30,6 +30,8 @@ static void check(int condition, const char *message)
 
 static int write_bytes(const char *path, const char *data)
 {
+    char native_path[MAX_PATH];
+    path = posix_norm(native_path, sizeof native_path, path);
     FILE *fp = fopen(path, "wb");
     size_t size = strlen(data);
     int ok = fp && fwrite(data, 1, size, fp) == size;
@@ -40,6 +42,8 @@ static int write_bytes(const char *path, const char *data)
 
 static char *read_bytes(const char *path)
 {
+    char native_path[MAX_PATH];
+    path = posix_norm(native_path, sizeof native_path, path);
     FILE *fp = fopen(path, "rb");
     long size;
     char *data;
@@ -135,13 +139,19 @@ static void test_crlf_and_failed_replace(const char *folder)
     lock = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     check(lock != INVALID_HANDLE_VALUE, "lock target without delete sharing");
-    check(!ini_doc_save(&doc, why, sizeof why), "locked replacement must fail");
+    check(ini_doc_save(&doc, why, sizeof why), "atomic POSIX replacement while a reader is open");
+    if (lock != INVALID_HANDLE_VALUE) {
+        char old_bytes[256] = { 0 };
+        DWORD got = 0;
+        check(ReadFile(lock, old_bytes, sizeof old_bytes - 1, &got, NULL) &&
+              strstr(old_bytes, "volume = 125"), "open reader retains the previous generation");
+    }
     if (lock != INVALID_HANDLE_VALUE)
         CloseHandle(lock);
     ini_doc_free(&doc);
     saved = read_bytes(path);
-    check(saved && strstr(saved, "volume = 125  ; cabinet\r\n"),
-          "failed replacement leaves original intact");
+    check(saved && strstr(saved, "volume = 130  ; cabinet\r\n"),
+          "new reader sees the complete replacement");
     free(saved);
 }
 
